@@ -1,0 +1,35 @@
+// ────────────────────────────────────────────────────────────
+// Caesar Cipher
+// ────────────────────────────────────────────────────────────
+
+pub fn encrypt(text: str, key: int) -> str {
+    let mut result = ""
+    for ch in text {
+        let c = ord(ch)
+        if c >= ord("A") && c <= ord("Z") {
+            result += chr((c - ord("A") + key) % 26 + ord("A"))
+        } else if c >= ord("a") && c <= ord("z") {
+            result += chr((c - ord("a") + key) % 26 + ord("a"))
+        } else { result += ch }
+    }
+    return result
+}
+
+pub fn decrypt(text: str, key: int) -> str { return encrypt(text, 26 - key) }
+
+pub fn brute_force(cipher: str) -> list {
+    let mut results = []
+    let mut k = 0
+    while k < 26 {
+        results = push(results, [k, decrypt(cipher, k)])
+        k += 1
+    }
+    return results
+}
+
+fn main() {
+    let msg = "The Quick Brown Fox"
+    let enc = encrypt(msg, 13)
+    println("Encrypted: " + enc)
+    println("Decrypted: " + decrypt(enc, 13))
+}

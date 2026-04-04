@@ -1,0 +1,30 @@
+// ────────────────────────────────────────────────────────────
+// Base64 Encode/Decode
+// ────────────────────────────────────────────────────────────
+
+let CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+pub fn encode(input: str) -> str {
+    let mut result = ""
+    let mut i = 0
+    while i < len(input) {
+        let b0 = ord(input[i])
+        let b1 = if i + 1 < len(input) { ord(input[i + 1]) } else { 0 }
+        let b2 = if i + 2 < len(input) { ord(input[i + 2]) } else { 0 }
+        result += CHARSET[(b0 >> 2)] as str
+        result += CHARSET[((b0 & 3) << 4) | (b1 >> 4)] as str
+        if i + 1 < len(input) {
+            result += CHARSET[((b1 & 15) << 2) | (b2 >> 6)] as str
+        } else { result += "=" }
+        if i + 2 < len(input) {
+            result += CHARSET[b2 & 63] as str
+        } else { result += "=" }
+        i += 3
+    }
+    return result
+}
+
+fn main() {
+    println("Encoded: " + encode("Hello, Lateralus!"))
+    println("Encoded: " + encode("Man"))
+}

@@ -1,0 +1,41 @@
+// ────────────────────────────────────────────────────────────
+// Simplified Hash Function
+// ────────────────────────────────────────────────────────────
+
+pub fn simple_hash(data: str, size: int) -> int {
+    let mut hash = 5381
+    for ch in data {
+        hash = ((hash * 33) + ord(ch)) % size
+    }
+    return hash
+}
+
+pub fn hash_hex(data: str) -> str {
+    let mut h1 = 0; let mut h2 = 0; let mut h3 = 0; let mut h4 = 0
+    for ch in data {
+        h1 = (h1 * 31 + ord(ch)) % 65536
+        h2 = (h2 * 37 + ord(ch)) % 65536
+        h3 = (h3 * 41 + ord(ch)) % 65536
+        h4 = (h4 * 43 + ord(ch)) % 65536
+    }
+    let hex_chars = "0123456789abcdef"
+    let mut result = ""
+    for h in [h1, h2, h3, h4] {
+        let mut val = h
+        let mut hex_part = ""
+        let mut i = 0
+        while i < 4 {
+            hex_part = hex_chars[val % 16] as str + hex_part
+            val = val / 16
+            i += 1
+        }
+        result += hex_part
+    }
+    return result
+}
+
+fn main() {
+    println("Hash of 'hello': " + hash_hex("hello"))
+    println("Hash of 'Hello': " + hash_hex("Hello"))
+    println("Hash of 'hellp': " + hash_hex("hellp"))
+}

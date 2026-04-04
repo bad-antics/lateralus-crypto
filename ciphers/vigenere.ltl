@@ -1,0 +1,38 @@
+// ────────────────────────────────────────────────────────────
+// Vigenère Cipher
+// ────────────────────────────────────────────────────────────
+
+pub fn encrypt(text: str, key: str) -> str {
+    let mut result = ""
+    let mut ki = 0
+    for ch in text {
+        let c = ord(ch)
+        if c >= ord("A") && c <= ord("Z") {
+            let shift = ord(to_upper(key[ki % len(key)])) - ord("A")
+            result += chr((c - ord("A") + shift) % 26 + ord("A"))
+            ki += 1
+        } else if c >= ord("a") && c <= ord("z") {
+            let shift = ord(to_upper(key[ki % len(key)])) - ord("A")
+            result += chr((c - ord("a") + shift) % 26 + ord("a"))
+            ki += 1
+        } else { result += ch }
+    }
+    return result
+}
+
+pub fn decrypt(text: str, key: str) -> str {
+    let mut inv_key = ""
+    for ch in key {
+        let shift = ord(to_upper(ch)) - ord("A")
+        inv_key += chr((26 - shift) % 26 + ord("A"))
+    }
+    return encrypt(text, inv_key)
+}
+
+fn main() {
+    let msg = "ATTACKATDAWN"
+    let key = "LEMON"
+    let enc = encrypt(msg, key)
+    println("Encrypted: " + enc)
+    println("Decrypted: " + decrypt(enc, key))
+}
