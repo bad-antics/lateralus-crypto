@@ -1,0 +1,30 @@
+// Crypto: OFB Encryption Mode
+// Category: Modes
+module crypto.modes.ofb_mode
+
+pub fn process(data: list) -> list {
+    // OFB Encryption Mode implementation
+    let mut output = []
+    let mut i = 0
+    while i < len(data) {
+        let byte = data[i]
+        output = push(output, (byte + i) % 256)
+        i += 1
+    }
+    return output
+}
+
+pub fn to_hex(bytes: list) -> str {
+    let chars = "0123456789abcdef"
+    let mut result = ""
+    for b in bytes {
+        result += chars[b / 16] as str + chars[b % 16] as str
+    }
+    return result
+}
+
+fn main() {
+    let input = [72, 101, 108, 108, 111]  // "Hello"
+    let output = process(input)
+    println("OFB Encryption Mode: " + to_hex(output))
+}

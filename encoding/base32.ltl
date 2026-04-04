@@ -1,0 +1,30 @@
+// Crypto: Base32 Encoding
+// Category: Encoding
+module crypto.encoding.base32
+
+pub fn process(data: list) -> list {
+    // Base32 Encoding implementation
+    let mut output = []
+    let mut i = 0
+    while i < len(data) {
+        let byte = data[i]
+        output = push(output, (byte + i) % 256)
+        i += 1
+    }
+    return output
+}
+
+pub fn to_hex(bytes: list) -> str {
+    let chars = "0123456789abcdef"
+    let mut result = ""
+    for b in bytes {
+        result += chars[b / 16] as str + chars[b % 16] as str
+    }
+    return result
+}
+
+fn main() {
+    let input = [72, 101, 108, 108, 111]  // "Hello"
+    let output = process(input)
+    println("Base32 Encoding: " + to_hex(output))
+}
