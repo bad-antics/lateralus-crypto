@@ -1,30 +1,76 @@
-// Crypto: PBKDF2 Key Derivation
-// Category: Kdf
+// crypto/kdf/pbkdf2.ltl — PKCS#5 v2 / RFC 8018 PBKDF2 with HMAC-SHA-256.
+//
+// PBKDF2 stretches a password into a key by running an HMAC in a
+// feedback loop N times. Its only defense against GPU/ASIC attackers
+// is the iteration count — it is cheap to parallelize, so N must be
+// high (OWASP 2023 recommends ≥ 600,000 for PBKDF2-HMAC-SHA256) and
+// memory-hard alternatives (Argon2id, scrypt) should be preferred for
+// new designs. Still mandated by FIPS for password storage.
+//
+// Test vector (RFC 6070 with HMAC-SHA1 substituted for SHA-256 per
+// RFC 7914; also NIST SP 800-132):
+//   P = "password", S = "salt", c = 1, dkLen = 32 (HMAC-SHA256)
+//   → 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+
 module crypto.kdf.pbkdf2
 
-pub fn process(data: list) -> list {
-    // PBKDF2 Key Derivation implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+use crypto.mac.hmac
+
+const HASH_LEN: int = 32  // HMAC-SHA-256 output size
+
+pub fn derive(password: list, salt: list, iterations: int, dk_len: int) -> list {
+    if iterations < 1 { throw Error("PBKDF2: iterations must be ≥ 1") }
+    if dk_len > 0xFFFFFFFF * HASH_LEN { throw Error("PBKDF2: dk_len too large") }
+    let n_blocks = (dk_len + HASH_LEN - 1) / HASH_LEN
+    let mut dk = []
+    let mut i = 1
+    while i <= n_blocks {
+        let block = f(password, salt, iterations, i)
+        dk = dk + block
         i += 1
     }
-    return output
+    return slice(dk, 0, dk_len)
+}
+
+fn f(password: list, salt: list, iterations: int, block_index: int) -> list {
+    // U_1 = PRF(P, S || INT(i))
+    let mut input = salt
+    input = push(input, (block_index >> 24) & 0xFF)
+    input = push(input, (block_index >> 16) & 0xFF)
+    input = push(input, (block_index >> 8) & 0xFF)
+    input = push(input, block_index & 0xFF)
+    let mut u = hmac.hmac_sha256(password, input)
+    let mut t = u
+    let mut j = 1
+    while j < iterations {
+        u = hmac.hmac_sha256(password, u)
+        let mut k = 0
+        while k < HASH_LEN { t[k] = t[k] ^ u[k]; k += 1 }
+        j += 1
+    }
+    return t
+}
+
+/// Verify a previously-derived key. Uses constant-time comparison so
+/// mismatches don't leak where the difference occurred.
+pub fn verify(password: list, salt: list, iterations: int, expected: list) -> bool {
+    let derived = derive(password, salt, iterations, len(expected))
+    let mut diff = 0
+    let mut i = 0
+    while i < len(expected) { diff = diff | (derived[i] ^ expected[i]); i += 1 }
+    return diff == 0
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for byte in bytes { out += chars[byte / 16] as str + chars[byte % 16] as str }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("PBKDF2 Key Derivation: " + to_hex(output))
+    let password = [0x70,0x61,0x73,0x73,0x77,0x6f,0x72,0x64]  // "password"
+    let salt = [0x73,0x61,0x6c,0x74]                           // "salt"
+    println("c=1 dk  = " + to_hex(derive(password, salt, 1, 32)))
+    println("expected = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
 }
