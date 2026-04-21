@@ -1,30 +1,79 @@
-// Crypto: Base32 Encoding
-// Category: Encoding
+// crypto/encoding/base32.ltl — RFC 4648 Base32 (RFC 3548 alphabet).
+//
+// Base32 encodes 5 bytes → 8 characters from an alphabet that excludes
+// visually confusable characters (no 0/O, 1/I/L). Used by TOTP
+// secrets, Tor .onion v2 addresses (80-bit hashes), Geohash, some
+// DNS-safe tokens, and libraries that need case-insensitive
+// transcription from voice or handwriting.
+//
+// RFC 4648 also defines Base32hex (different alphabet, sorts
+// lexicographically the same as binary) for DNS/NSEC3 — implemented
+// at the bottom.
+
 module crypto.encoding.base32
 
-pub fn process(data: list) -> list {
-    // Base32 Encoding implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+const STD: str  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+const HEX: str  = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+
+pub fn encode(data: list) -> str      { return encode_with(data, STD) }
+pub fn encode_hex(data: list) -> str  { return encode_with(data, HEX) }
+
+fn encode_with(data: list, alpha: str) -> str {
+    let mut out = ""
+    let mut buf = 0
+    let mut bits = 0
+    for byte in data {
+        buf = (buf << 8) | byte
+        bits += 8
+        while bits >= 5 {
+            bits -= 5
+            out += alpha[(buf >> bits) & 0x1F] as str
+        }
     }
-    return output
+    if bits > 0 {
+        out += alpha[(buf << (5 - bits)) & 0x1F] as str
+    }
+    // Pad to a multiple of 8 chars with '='.
+    while (len(out) % 8) != 0 { out += "=" }
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn decode(s: str) -> list      { return decode_with(s, STD) }
+pub fn decode_hex(s: str) -> list  { return decode_with(s, HEX) }
+
+fn decode_with(s: str, alpha: str) -> list {
+    let mut out = []
+    let mut buf = 0
+    let mut bits = 0
+    let mut i = 0
+    while i < len(s) {
+        let c = upper(s[i])
+        if c == '=' { break }
+        let v = index_of(alpha, c)
+        if v == -1 { i += 1; continue }
+        buf = (buf << 5) | v
+        bits += 5
+        if bits >= 8 {
+            bits -= 8
+            out = push(out, (buf >> bits) & 0xFF)
+        }
+        i += 1
     }
-    return result
+    return out
+}
+
+fn index_of(alpha: str, c: char) -> int {
+    let mut i = 0
+    while i < len(alpha) { if alpha[i] == c { return i } ; i += 1 }
+    return -1
+}
+
+fn upper(c: char) -> char {
+    if c >= 'a' && c <= 'z' { return ((c as int) - 32) as char }
+    return c
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Base32 Encoding: " + to_hex(output))
+    let data = [0x66, 0x6f, 0x6f, 0x62, 0x61]  // "fooba"
+    println("encode(\"fooba\") = " + encode(data))  // MZXW6YTB
 }
