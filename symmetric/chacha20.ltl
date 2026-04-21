@@ -1,30 +1,114 @@
-// Crypto: ChaCha20 Stream Cipher
-// Category: Symmetric
+// crypto/symmetric/chacha20.ltl — RFC 8439 ChaCha20 stream cipher.
+//
+// ChaCha20 generates a keystream from a 32-byte key, 12-byte nonce,
+// and 32-bit counter by running 20 rounds of a quarter-round
+// permutation on a 16-word (512-bit) state. The state layout is:
+//   cccccccc  cccccccc  cccccccc  cccccccc   ("expand 32-byte k")
+//   kkkkkkkk  kkkkkkkk  kkkkkkkk  kkkkkkkk
+//   kkkkkkkk  kkkkkkkk  kkkkkkkk  kkkkkkkk
+//   bbbbbbbb  nnnnnnnn  nnnnnnnn  nnnnnnnn   (block counter, 96-bit nonce)
+// ChaCha20 is the stream half of ChaCha20-Poly1305 AEAD, used in TLS
+// 1.3, WireGuard, OpenSSH, age, and libsodium.
+//
+// Test vector (RFC 8439 §2.4.2):
+//   keystream for counter=1 starts with 10f1e7e4d13b5915500fdd1fa32071c4...
+
 module crypto.symmetric.chacha20
 
-pub fn process(data: list) -> list {
-    // ChaCha20 Stream Cipher implementation
-    let mut output = []
+const MASK32: int = 0xFFFFFFFF
+
+fn rotl32(x: int, n: int) -> int { return ((x << n) | (x >> (32 - n))) & MASK32 }
+
+fn quarter_round(state: list, a: int, b: int, c: int, d: int) -> list {
+    state[a] = (state[a] + state[b]) & MASK32
+    state[d] = rotl32(state[d] ^ state[a], 16)
+    state[c] = (state[c] + state[d]) & MASK32
+    state[b] = rotl32(state[b] ^ state[c], 12)
+    state[a] = (state[a] + state[b]) & MASK32
+    state[d] = rotl32(state[d] ^ state[a], 8)
+    state[c] = (state[c] + state[d]) & MASK32
+    state[b] = rotl32(state[b] ^ state[c], 7)
+    return state
+}
+
+fn block(key: list, counter: int, nonce: list) -> list {
+    let mut state = [
+        0x61707865, 0x3320646e, 0x79622d32, 0x6b206574,
+        le32(key, 0),  le32(key, 4),  le32(key, 8),  le32(key, 12),
+        le32(key, 16), le32(key, 20), le32(key, 24), le32(key, 28),
+        counter & MASK32,
+        le32(nonce, 0), le32(nonce, 4), le32(nonce, 8),
+    ]
+    let orig = state
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+    while i < 10 {
+        // Column rounds
+        state = quarter_round(state, 0, 4,  8, 12)
+        state = quarter_round(state, 1, 5,  9, 13)
+        state = quarter_round(state, 2, 6, 10, 14)
+        state = quarter_round(state, 3, 7, 11, 15)
+        // Diagonal rounds
+        state = quarter_round(state, 0, 5, 10, 15)
+        state = quarter_round(state, 1, 6, 11, 12)
+        state = quarter_round(state, 2, 7,  8, 13)
+        state = quarter_round(state, 3, 4,  9, 14)
         i += 1
     }
-    return output
+    // Add the original state (feed-forward); serialize little-endian.
+    let mut out = []
+    i = 0
+    while i < 16 {
+        let word = (state[i] + orig[i]) & MASK32
+        out = push(out, word & 0xFF)
+        out = push(out, (word >> 8) & 0xFF)
+        out = push(out, (word >> 16) & 0xFF)
+        out = push(out, (word >> 24) & 0xFF)
+        i += 1
+    }
+    return out
+}
+
+fn le32(bytes: list, off: int) -> int {
+    return (bytes[off] | (bytes[off+1] << 8) | (bytes[off+2] << 16) | (bytes[off+3] << 24)) & MASK32
+}
+
+// Encrypt = decrypt: XOR input with the keystream.
+pub fn encrypt(key: list, nonce: list, initial_counter: int, plaintext: list) -> list {
+    if len(key) != 32 { throw Error("ChaCha20 key must be 32 bytes") }
+    if len(nonce) != 12 { throw Error("ChaCha20 nonce must be 12 bytes") }
+    let mut out = []
+    let mut counter = initial_counter
+    let mut i = 0
+    while i < len(plaintext) {
+        let ks = block(key, counter, nonce)
+        let mut j = 0
+        while j < 64 && i + j < len(plaintext) {
+            out = push(out, plaintext[i + j] ^ ks[j])
+            j += 1
+        }
+        i += 64
+        counter = (counter + 1) & MASK32
+    }
+    return out
+}
+
+pub fn decrypt(key: list, nonce: list, initial_counter: int, ciphertext: list) -> list {
+    return encrypt(key, nonce, initial_counter, ciphertext)
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for byte in bytes { out += chars[byte / 16] as str + chars[byte % 16] as str }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("ChaCha20 Stream Cipher: " + to_hex(output))
+    // RFC 8439 §2.4.2: "Ladies and Gentlemen of the class of '99..."
+    let mut key = []
+    let mut i = 0
+    while i < 32 { key = push(key, i); i += 1 }
+    let nonce = [0,0,0,0, 0,0,0,0x4a, 0,0,0,0]
+    let pt = [0x4c,0x61,0x64,0x69,0x65,0x73,0x20,0x61,0x6e,0x64,0x20,0x47]
+    println("ct = " + to_hex(encrypt(key, nonce, 1, pt)))
 }
