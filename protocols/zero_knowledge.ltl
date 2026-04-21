@@ -1,30 +1,77 @@
-// Crypto: Zero-Knowledge Proof (Simplified)
-// Category: Protocols
+// crypto/protocols/zero_knowledge.ltl — Schnorr identification + NIZK.
+//
+// A zero-knowledge proof lets a prover convince a verifier that a
+// statement is true without revealing WHY. Classic example: Schnorr's
+// Σ-protocol for discrete-log knowledge.
+//
+// Setup: public (p, g, y) with y = g^x mod p; prover knows x.
+// 1. Commit:   prover picks r, sends t = g^r mod p.
+// 2. Challenge: verifier sends random c.
+// 3. Response:  prover sends s = r + c·x mod (p−1).
+// 4. Verify:   g^s ≡ t · y^c (mod p).
+//
+// Completeness, special soundness, honest-verifier zero-knowledge.
+// Fiat–Shamir transforms this into a non-interactive proof by setting
+// c = H(g, y, t) — the basis for Schnorr signatures, Bulletproofs,
+// zk-SNARKs, and countless blockchain protocols.
+//
+// Applications: anonymous credentials (Idemix, Anonymous Credentials
+// Light), confidential transactions (Monero's ring signatures use
+// the same core idea), WireGuard's identity hiding.
+
 module crypto.protocols.zero_knowledge
 
-pub fn process(data: list) -> list {
-    // Zero-Knowledge Proof (Simplified) implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+use crypto.asymmetric.rsa_simple
+use crypto.hash.sha256
+
+pub struct Proof { pub commitment: int, pub challenge: int, pub response: int }
+
+/// Interactive Schnorr identification — step 1.
+pub fn prove_commit(p: int, g: int, r: int) -> int {
+    return rsa_simple.mod_pow(g, r, p)   // t = g^r
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+/// Step 3: response given challenge c.
+pub fn prove_respond(x: int, r: int, c: int, p: int) -> int {
+    return (r + c * x) % (p - 1)
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Zero-Knowledge Proof (Simplified): " + to_hex(output))
+/// Verifier check.
+pub fn verify(p: int, g: int, y: int, t: int, c: int, s: int) -> bool {
+    let lhs = rsa_simple.mod_pow(g, s, p)
+    let rhs = (t * rsa_simple.mod_pow(y, c, p)) % p
+    return lhs == rhs
+}
+
+/// Fiat–Shamir non-interactive variant. Challenge derived from a hash
+/// binding (g, y, t) so the prover cannot cheat by choosing t after
+/// seeing c.
+pub fn prove_nizk(p: int, g: int, x: int, r: int) -> Proof {
+    let y = rsa_simple.mod_pow(g, x, p)
+    let t = rsa_simple.mod_pow(g, r, p)
+    let transcript = int_bytes(g) + int_bytes(y) + int_bytes(t)
+    let c = bytes_to_int(sha256.hash(transcript)) % (p - 1)
+    let s = (r + c * x) % (p - 1)
+    return Proof { commitment: t, challenge: c, response: s }
+}
+
+pub fn verify_nizk(p: int, g: int, y: int, proof: Proof) -> bool {
+    // Re-derive challenge and verify.
+    let transcript = int_bytes(g) + int_bytes(y) + int_bytes(proof.commitment)
+    let expected_c = bytes_to_int(sha256.hash(transcript)) % (p - 1)
+    if expected_c != proof.challenge { return false }
+    return verify(p, g, y, proof.commitment, proof.challenge, proof.response)
+}
+
+fn int_bytes(v: int) -> list {
+    let mut out = []; let mut n = v
+    if n == 0 { return [0] }
+    while n > 0 { out = push(out, n & 0xFF); n = n >> 8 }
+    return out
+}
+
+fn bytes_to_int(b: list) -> int {
+    let mut v = 0
+    for byte in b { v = (v << 8) | byte }
+    return v
 }
