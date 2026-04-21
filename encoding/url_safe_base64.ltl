@@ -1,30 +1,48 @@
-// Crypto: URL-Safe Base64
-// Category: Encoding
+// crypto/encoding/url_safe_base64.ltl — Base64url (RFC 4648 §5).
+//
+// Same alphabet as standard base64 but with + → - and / → _, and
+// trailing '=' padding usually stripped. Safe inside URL path
+// components, query strings, cookies, and JWT segments without
+// percent-encoding. JWTs and Fernet tokens always use this variant.
+
 module crypto.encoding.url_safe_base64
 
-pub fn process(data: list) -> list {
-    // URL-Safe Base64 implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+use crypto.encoding.base64
+
+pub fn encode(data: list) -> str {
+    // Standard URL-safe encoding omits padding. Callers who need
+    // padding-preserving output should call `encode_with_pad` instead.
+    let s = base64.encode_urlsafe(data)
+    return strip_padding(s)
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+pub fn encode_with_pad(data: list) -> str {
+    // Some APIs (e.g. Go's base64.URLEncoding) keep '=' padding. Map
+    // to base64.encode with the URL alphabet then re-attach '='.
+    let raw = base64.encode_urlsafe(data)
+    let n = len(raw)
+    let rem = len(data) % 3
+    if rem == 1 { return raw + "==" }
+    if rem == 2 { return raw + "=" }
+    return raw
+}
+
+pub fn decode(s: str) -> list {
+    // Restore padding before handing off to the unified decoder so a
+    // malformed (but tolerable) unpadded input still decodes correctly.
+    let mut padded = s
+    while (len(padded) % 4) != 0 { padded += "=" }
+    return base64.decode(padded)
+}
+
+fn strip_padding(s: str) -> str {
+    let mut end = len(s)
+    while end > 0 && s[end - 1] == '=' { end -= 1 }
+    return slice(s, 0, end)
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("URL-Safe Base64: " + to_hex(output))
+    let data = [0xFB, 0xEF]   // encodes to "++8=" standard, "--8" urlsafe
+    println("urlsafe  = " + encode(data))
+    println("round    = " + decode(encode(data)) as str)
 }
