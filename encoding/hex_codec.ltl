@@ -1,30 +1,75 @@
-// Crypto: Hex Encoding/Decoding
-// Category: Encoding
+// crypto/encoding/hex_codec.ltl — Hex (base16) codec with strict decoder.
+//
+// One byte ↔ two hex chars. Trivial, but used everywhere: git object
+// IDs, SSH fingerprints, X.509 serials, etherneum addresses, device
+// MACs. The decoder is strict — rejects odd-length input and any
+// non-hex character. Accepts both upper- and lower-case on decode but
+// emits lower-case on encode (per common convention; Bitcoin and TLS
+// both use lower-case).
+
 module crypto.encoding.hex_codec
 
-pub fn process(data: list) -> list {
-    // Hex Encoding/Decoding implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+const LOWER: str = "0123456789abcdef"
+const UPPER: str = "0123456789ABCDEF"
+
+pub fn encode(data: list) -> str { return encode_with(data, LOWER) }
+pub fn encode_upper(data: list) -> str { return encode_with(data, UPPER) }
+
+fn encode_with(data: list, alpha: str) -> str {
+    let mut out = ""
+    for byte in data {
+        out += alpha[(byte >> 4) & 0x0F] as str
+        out += alpha[ byte       & 0x0F] as str
     }
-    return output
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn decode(s: str) -> list {
+    if (len(s) % 2) != 0 { throw Error("hex: odd input length") }
+    let mut out = []
+    let mut i = 0
+    while i < len(s) {
+        let hi = nibble(s[i])
+        let lo = nibble(s[i + 1])
+        out = push(out, (hi << 4) | lo)
+        i += 2
     }
-    return result
+    return out
+}
+
+pub fn decode_lenient(s: str) -> list {
+    // Skip whitespace and common separators (':', '-', ' '). Useful for
+    // PGP/SSH key fingerprints like "AB:CD:EF:..." or "AB CD EF ...".
+    let mut clean = ""
+    let mut i = 0
+    while i < len(s) {
+        let c = s[i]
+        if c != ':' && c != '-' && c != ' ' && c != '\n' && c != '\t' { clean += c as str }
+        i += 1
+    }
+    return decode(clean)
+}
+
+fn nibble(c: char) -> int {
+    if c >= '0' && c <= '9' { return (c as int) - ('0' as int) }
+    if c >= 'a' && c <= 'f' { return (c as int) - ('a' as int) + 10 }
+    if c >= 'A' && c <= 'F' { return (c as int) - ('A' as int) + 10 }
+    throw Error("hex: non-hex character")
+}
+
+// Constant-time hex comparison — useful when comparing hex-encoded
+// MACs or hashes from user input.
+pub fn eq_ct(a: str, b: str) -> bool {
+    if len(a) != len(b) { return false }
+    let mut diff = 0
+    let mut i = 0
+    while i < len(a) { diff = diff | ((a[i] as int) ^ (b[i] as int)); i += 1 }
+    return diff == 0
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Hex Encoding/Decoding: " + to_hex(output))
+    let data = [0xDE, 0xAD, 0xBE, 0xEF]
+    println("hex = " + encode(data))               // deadbeef
+    println("round-trip = " + decode("deadbeef") as str)
+    println("lenient     = " + decode_lenient("DE:AD:BE:EF") as str)
 }
