@@ -1,30 +1,75 @@
-// Crypto: RC4 Stream Cipher
-// Category: Symmetric
+// crypto/symmetric/rc4.ltl — RC4 stream cipher (educational; INSECURE).
+//
+// RC4 is BROKEN and must not be used for new applications. TLS
+// deprecated it in RFC 7465 (2015) because of biased keystream
+// bytes exploitable in the first few outputs. We keep it here for
+// interop with legacy systems (old WEP, some PDF encryption, early
+// SSL) and as a teaching tool — RC4 is the cleanest example of a
+// stream cipher's key-schedule + pseudo-random-generation structure.
+//
+// Real-world mitigation: drop the first 3072 bytes of keystream
+// (a.k.a. RC4-drop[3072]) before using it for any message. We expose
+// both the raw primitive and the drop variant.
+
 module crypto.symmetric.rc4
 
-pub fn process(data: list) -> list {
-    // RC4 Stream Cipher implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+pub struct Rc4 { s: list, i: int, j: int }
+
+pub fn new(key: list) -> Rc4 {
+    if len(key) < 1 || len(key) > 256 { throw Error("RC4 key length must be 1..256") }
+    let mut s = []
+    let mut k = 0
+    while k < 256 { s = push(s, k); k += 1 }
+    let mut j = 0
+    k = 0
+    while k < 256 {
+        j = (j + s[k] + key[k % len(key)]) & 0xFF
+        let tmp = s[k]; s[k] = s[j]; s[j] = tmp
+        k += 1
     }
-    return output
+    return Rc4 { s: s, i: 0, j: 0 }
+}
+
+impl Rc4 {
+    pub fn next_byte(self) -> int {
+        self.i = (self.i + 1) & 0xFF
+        self.j = (self.j + self.s[self.i]) & 0xFF
+        let tmp = self.s[self.i]; self.s[self.i] = self.s[self.j]; self.s[self.j] = tmp
+        return self.s[(self.s[self.i] + self.s[self.j]) & 0xFF]
+    }
+    pub fn xor(self, data: list) -> list {
+        let mut out = []
+        for byte in data { out = push(out, byte ^ self.next_byte()) }
+        return out
+    }
+    pub fn skip(self, n: int) {
+        let mut k = 0
+        while k < n { self.next_byte(); k += 1 }
+    }
+}
+
+pub fn encrypt(key: list, data: list) -> list {
+    let cipher = new(key)
+    return cipher.xor(data)
+}
+
+pub fn encrypt_drop(key: list, data: list, drop: int) -> list {
+    let cipher = new(key)
+    cipher.skip(drop)
+    return cipher.xor(data)
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for byte in bytes { out += chars[byte / 16] as str + chars[byte % 16] as str }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("RC4 Stream Cipher: " + to_hex(output))
+    // RFC 6229 test vector: key=0x0102030405, first 16 keystream bytes
+    // should be b2396305f03dc027ccc3524a0a1118a8
+    let key = [0x01, 0x02, 0x03, 0x04, 0x05]
+    let zeros = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+    println("ks = " + to_hex(encrypt(key, zeros)))
 }
