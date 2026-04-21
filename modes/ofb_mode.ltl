@@ -1,30 +1,57 @@
-// Crypto: OFB Encryption Mode
-// Category: Modes
+// crypto/modes/ofb_mode.ltl — Output Feedback mode (NIST SP 800-38A §6.4).
+//
+// OFB encrypts by chaining E() calls: O_i = E(O_{i-1}), starting from
+// O_0 = IV. The keystream is the concatenation of O_1, O_2, … and is
+// XORed with the plaintext. Unlike CTR, OFB cannot be parallelized
+// because each block depends on the previous one. Unlike CBC,
+// single-bit ciphertext errors only flip the corresponding plaintext
+// bit (no error propagation). Legacy mode; CTR is strictly better for
+// most uses, but OFB still appears in satellite uplinks and some
+// older encrypted telemetry channels.
+
 module crypto.modes.ofb_mode
 
-pub fn process(data: list) -> list {
-    // OFB Encryption Mode implementation
-    let mut output = []
+use crypto.symmetric.aes_simple
+
+const BLOCK: int = 16
+
+pub fn encrypt(key: list, iv: list, plaintext: list) -> list {
+    return xor_stream(key, iv, plaintext)
+}
+
+pub fn decrypt(key: list, iv: list, ciphertext: list) -> list {
+    return xor_stream(key, iv, ciphertext)  // OFB is symmetric
+}
+
+fn xor_stream(key: list, iv: list, data: list) -> list {
+    if len(iv) != BLOCK { throw Error("OFB IV must be 16 bytes") }
+    let mut out = []
+    let mut o = iv
     let mut i = 0
     while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+        o = aes_simple.encrypt_block(key, o)
+        let mut j = 0
+        while j < BLOCK && i + j < len(data) {
+            out = push(out, data[i + j] ^ o[j])
+            j += 1
+        }
+        i += BLOCK
+    }
+    return out
+}
+
+/// Pre-compute n blocks of keystream. Useful when the same IV is used
+/// for several messages (but note: reusing an IV across OFB messages
+/// with the same key is as bad as nonce reuse in CTR — keystream
+/// repeats).
+pub fn keystream(key: list, iv: list, n_blocks: int) -> list {
+    let mut out = []
+    let mut o = iv
+    let mut i = 0
+    while i < n_blocks {
+        o = aes_simple.encrypt_block(key, o)
+        out = out + o
         i += 1
     }
-    return output
-}
-
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
-}
-
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("OFB Encryption Mode: " + to_hex(output))
+    return out
 }
