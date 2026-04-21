@@ -1,30 +1,104 @@
-// Crypto: Base58 Encoding
-// Category: Encoding
+// crypto/encoding/base58.ltl — Base58 (Bitcoin alphabet) with Base58Check.
+//
+// Base58 is base64 with all visually-confusable characters removed:
+// no 0, O, I, l. The alphabet is ordered "123456789A-HJ-NP-Za-km-z"
+// so the lexicographic sort order matches the numeric sort order of
+// the encoded integer. Used by Bitcoin addresses, Ripple, IPFS CIDv0,
+// Monero integrated addresses, and Solana public keys.
+//
+// Base58Check adds a 4-byte truncated double-SHA-256 checksum so
+// typos in copied addresses are almost always detected before a
+// transaction is signed.
+
 module crypto.encoding.base58
 
-pub fn process(data: list) -> list {
-    // Base58 Encoding implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+use crypto.hash.sha256
+
+const ALPHA: str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+pub fn encode(data: list) -> str {
+    // Leading zero bytes map to leading '1' characters in Base58.
+    let mut leading = 0
+    while leading < len(data) && data[leading] == 0 { leading += 1 }
+    // Treat the whole input as a big integer, repeatedly divide by 58.
+    let mut n = bytes_to_int(data)
+    let mut out = ""
+    while n > 0 {
+        out = ALPHA[n % 58] as str + out
+        n = n / 58
     }
-    return output
+    let mut prefix = ""
+    let mut i = 0
+    while i < leading { prefix += "1"; i += 1 }
+    return prefix + out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn decode(s: str) -> list {
+    let mut leading = 0
+    while leading < len(s) && s[leading] == '1' { leading += 1 }
+    let mut n = 0
+    let mut i = 0
+    while i < len(s) {
+        let v = index_of(ALPHA, s[i])
+        if v == -1 { throw Error("base58: invalid character") }
+        n = n * 58 + v
+        i += 1
     }
-    return result
+    let mut bytes = int_to_bytes(n)
+    // Restore leading zeros.
+    let mut prefix = []
+    i = 0
+    while i < leading { prefix = push(prefix, 0); i += 1 }
+    return prefix + bytes
+}
+
+// Base58Check: prepend version byte, append 4-byte double-SHA256
+// checksum, then Base58-encode the concatenation.
+pub fn encode_check(version: int, payload: list) -> str {
+    let mut buf = [version] + payload
+    let h1 = sha256.hash(buf)
+    let h2 = sha256.hash(h1)
+    let mut i = 0
+    while i < 4 { buf = push(buf, h2[i]); i += 1 }
+    return encode(buf)
+}
+
+pub fn decode_check(s: str) -> list {
+    let buf = decode(s)
+    if len(buf) < 5 { throw Error("base58check: too short") }
+    let payload_end = len(buf) - 4
+    let h1 = sha256.hash(slice(buf, 0, payload_end))
+    let h2 = sha256.hash(h1)
+    let mut i = 0
+    while i < 4 {
+        if h2[i] != buf[payload_end + i] { throw Error("base58check: bad checksum") }
+        i += 1
+    }
+    return slice(buf, 0, payload_end)
+}
+
+fn bytes_to_int(bytes: list) -> int {
+    let mut n = 0
+    for byte in bytes { n = (n << 8) | byte }
+    return n
+}
+
+fn int_to_bytes(n: int) -> list {
+    if n == 0 { return [] }
+    let mut out = []
+    let mut v = n
+    while v > 0 { out = [v & 0xFF] + out; v = v >> 8 }
+    return out
+}
+
+fn index_of(alpha: str, c: char) -> int {
+    let mut i = 0
+    while i < len(alpha) { if alpha[i] == c { return i } ; i += 1 }
+    return -1
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Base58 Encoding: " + to_hex(output))
+    // Hello World → "2NEpo7TZRRrLZSi2U"
+    let data = [72, 101, 108, 108, 111, 32, 87, 111, 114, 108, 100]
+    println("base58 = " + encode(data))
 }
