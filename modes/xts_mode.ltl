@@ -1,30 +1,116 @@
-// Crypto: XTS Encryption Mode
-// Category: Modes
+// crypto/modes/xts_mode.ltl — XEX-based Tweaked Codebook mode with Ciphertext Stealing.
+//
+// XTS-AES is the IEEE P1619 / NIST SP 800-38E disk-encryption mode
+// used by BitLocker, FileVault 2, LUKS (default), macOS FileVault, and
+// VeraCrypt. Uses two AES keys (K1, K2): K1 encrypts the plaintext
+// after XOR with a per-sector tweak; K2 encrypts the sector number to
+// produce the initial tweak. The tweak is then multiplied by α (the
+// generator x of GF(2¹²⁸)) for each subsequent 16-byte block within a
+// sector, so identical plaintext in different positions encrypts to
+// different ciphertext — foiling watermark attacks.
+//
+// XTS is NOT an AEAD. Disk encryption provides CONFIDENTIALITY, not
+// INTEGRITY; an attacker who can modify disk blocks can scramble any
+// 16-byte block independently. For authenticated disk encryption use
+// dm-integrity or cryptsetup's integrity options on top of XTS.
+
 module crypto.modes.xts_mode
 
-pub fn process(data: list) -> list {
-    // XTS Encryption Mode implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+use crypto.symmetric.aes_simple
+
+const BLOCK: int = 16
+const GF_POLY: int = 0x87   // x¹²⁸ + x⁷ + x² + x + 1 reduction byte
+
+pub fn encrypt_sector(key1: list, key2: list, sector_num: int, plaintext: list) -> list {
+    return process_sector(key1, key2, sector_num, plaintext, true)
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn decrypt_sector(key1: list, key2: list, sector_num: int, ciphertext: list) -> list {
+    return process_sector(key1, key2, sector_num, ciphertext, false)
+}
+
+fn process_sector(k1: list, k2: list, sector: int, data: list, encrypt: bool) -> list {
+    if len(data) < BLOCK { throw Error("XTS: sector must be ≥ 16 bytes") }
+    // Tweak = AES(K2, sector_num_as_little_endian_128_bit).
+    let mut sector_bytes = []
+    let mut i = 0
+    while i < BLOCK { sector_bytes = push(sector_bytes, (sector >> (i * 8)) & 0xFF); i += 1 }
+    let mut tweak = aes_simple.encrypt_block(k2, sector_bytes)
+    let n_full = len(data) / BLOCK
+    let has_partial = (len(data) % BLOCK) != 0
+    let effective_full = if has_partial { n_full - 1 } else { n_full }
+    let mut out = []
+    let mut block_idx = 0
+    while block_idx < effective_full {
+        let block = slice(data, block_idx * BLOCK, (block_idx + 1) * BLOCK)
+        out = out + xex_block(k1, tweak, block, encrypt)
+        tweak = gf128_double(tweak)
+        block_idx += 1
     }
-    return result
+    if has_partial {
+        // Ciphertext stealing: process the last full block + partial
+        // block using two tweaks. For encryption, see IEEE P1619 §5.3.
+        let second_last = slice(data, effective_full * BLOCK, (effective_full + 1) * BLOCK)
+        let tail_len = len(data) - (effective_full + 1) * BLOCK
+        let tail = slice(data, (effective_full + 1) * BLOCK, len(data))
+        let tweak_next = gf128_double(tweak)
+        if encrypt {
+            let cc = xex_block(k1, tweak, second_last, true)
+            let mut cc_prefix = slice(cc, 0, tail_len)
+            let mut last_input = tail + slice(cc, tail_len, BLOCK)
+            out = out + xex_block(k1, tweak_next, last_input, true)
+            out = out + cc_prefix
+        } else {
+            // For decryption the two tweaks are applied in swapped order.
+            let cc = xex_block(k1, tweak_next, second_last, false)
+            let mut cc_prefix = slice(cc, 0, tail_len)
+            let mut last_input = tail + slice(cc, tail_len, BLOCK)
+            out = out + xex_block(k1, tweak, last_input, false)
+            out = out + cc_prefix
+        }
+    }
+    return out
+}
+
+fn xex_block(key: list, tweak: list, block: list, encrypt: bool) -> list {
+    let mut xored = []
+    let mut i = 0
+    while i < BLOCK { xored = push(xored, block[i] ^ tweak[i]); i += 1 }
+    let c = if encrypt { aes_simple.encrypt_block(key, xored) }
+            else       { aes_simple.decrypt_block(key, xored) }
+    let mut out = []
+    i = 0
+    while i < BLOCK { out = push(out, c[i] ^ tweak[i]); i += 1 }
+    return out
+}
+
+/// Multiply a 16-byte tweak by α = x in GF(2¹²⁸): shift left by one bit,
+/// then XOR with 0x87 at the low byte if the top bit overflowed.
+fn gf128_double(t: list) -> list {
+    let mut out = []
+    let mut carry = 0
+    let mut i = 0
+    while i < BLOCK {
+        let shifted = ((t[i] << 1) | carry) & 0xFF
+        carry = (t[i] >> 7) & 1
+        out = push(out, shifted)
+        i += 1
+    }
+    if carry == 1 { out[0] = out[0] ^ GF_POLY }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("XTS Encryption Mode: " + to_hex(output))
+    // 512-byte sector with per-sector key derivation → BitLocker uses
+    // a 256-bit K1 and 256-bit K2 combined into a 64-byte master key.
+    let k1 = zeros(16)
+    let k2 = zeros(16)
+    let pt = zeros(32)
+    println("ct len = " + len(encrypt_sector(k1, k2, 0, pt)) as str)
+}
+
+fn zeros(n: int) -> list {
+    let mut v = []; let mut i = 0
+    while i < n { v = push(v, 0); i += 1 }
+    return v
 }
