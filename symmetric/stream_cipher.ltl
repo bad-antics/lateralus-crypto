@@ -1,30 +1,60 @@
-// Crypto: Generic Stream Cipher
-// Category: Symmetric
+// crypto/symmetric/stream_cipher.ltl — Generic stream-cipher trait.
+//
+// A stream cipher is any PRNG seeded by a (key, nonce) pair whose
+// output is XORed with plaintext. This file defines the shared trait
+// so downstream code can be generic over ChaCha20, Salsa20, or a
+// block cipher in CTR mode. Critical rule: (key, nonce) pairs must
+// never repeat — reusing a nonce with the same key lets an attacker
+// XOR two ciphertexts and recover the plaintext XOR.
+
 module crypto.symmetric.stream_cipher
 
-pub fn process(data: list) -> list {
-    // Generic Stream Cipher implementation
-    let mut output = []
+pub trait StreamCipher {
+    /// Returns the next keystream byte. Stateful.
+    fn next_byte(self) -> int
+    /// Skip n bytes of keystream without allocating.
+    fn skip(self, n: int)
+}
+
+/// XOR helper: in-place for the common case of "encrypt in the buffer
+/// we already allocated". Uses the cipher's `next_byte` so any concrete
+/// stream cipher works.
+pub fn xor_inplace<C: StreamCipher>(cipher: C, buf: list) -> list {
+    let mut out = []
+    for byte in buf { out = push(out, byte ^ cipher.next_byte()) }
+    return out
+}
+
+/// Generate n bytes of pure keystream (for key-derivation, MAC-keys,
+/// etc.). Don't use this to derive long-term keys — use a proper KDF
+/// like HKDF on top.
+pub fn keystream<C: StreamCipher>(cipher: C, n: int) -> list {
+    let mut out = []
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+    while i < n { out = push(out, cipher.next_byte()); i += 1 }
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
-}
+/// Nonce management helper: a counter-based NonceSource that produces
+/// unique 12-byte nonces forever. Panics on counter overflow (which
+/// would require 2⁹⁶ messages; we'd sooner run out of CPU cycles).
+pub struct CounterNonce { prefix: list, counter: int }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Generic Stream Cipher: " + to_hex(output))
+impl CounterNonce {
+    pub fn new(prefix: list) -> CounterNonce {
+        if len(prefix) > 12 { throw Error("prefix too long for 12-byte nonce") }
+        return CounterNonce { prefix: prefix, counter: 0 }
+    }
+    pub fn next(self) -> list {
+        let mut n = self.prefix
+        let remaining = 12 - len(n)
+        let mut i = 0
+        while i < remaining {
+            n = push(n, (self.counter >> (i * 8)) & 0xFF)
+            i += 1
+        }
+        self.counter += 1
+        if self.counter >= (1 << (remaining * 8)) { throw Error("nonce space exhausted") }
+        return n
+    }
 }
