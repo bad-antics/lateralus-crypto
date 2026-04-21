@@ -1,30 +1,79 @@
-// Crypto: Certificate Verification
-// Category: Protocols
+// crypto/protocols/certificate_verify.ltl — X.509 certificate chain validation.
+//
+// An X.509 certificate binds a public key to a subject identity via
+// an issuer's signature. Validation (RFC 5280 §6) walks a chain from
+// leaf to a trust anchor (root CA), checking:
+//   1. Subject/issuer chaining: each cert's issuer = next cert's subject.
+//   2. Signature: issuer's public key verifies the current cert's sig.
+//   3. Validity period: now ∈ [notBefore, notAfter].
+//   4. Basic constraints: every intermediate has cA = true.
+//   5. Key usage: leaf has digitalSignature / keyEncipherment etc.
+//   6. Name constraints (RFC 5280 §4.2.1.10).
+//   7. Path length constraint: not exceeded.
+//   8. Revocation: OCSP (RFC 6960) or CRL (RFC 5280 §5) status.
+//
+// Modern verifiers add: SCT (Certificate Transparency, RFC 6962),
+// HPKP/CAA DNS checks, and policy-OID constraints. Getting this wrong
+// has caused real-world breakage: Heartbleed-era fakes, Superfish,
+// Lenovo/Komodia, DigiNotar compromise (2011), Symantec distrust.
+
 module crypto.protocols.certificate_verify
 
-pub fn process(data: list) -> list {
-    // Certificate Verification implementation
-    let mut output = []
+pub struct Cert {
+    pub subject: str,
+    pub issuer: str,
+    pub public_key: list,
+    pub signature: list,
+    pub signed_tbs: list,      // TBSCertificate DER (what was signed)
+    pub not_before: int,
+    pub not_after: int,
+    pub is_ca: bool,
+    pub path_length: int,      // -1 = unlimited
+    pub key_usage: list,       // e.g. ["digitalSignature", "keyEncipherment"]
+}
+
+pub enum ValidationError {
+    NotYetValid, Expired, BadSignature, BadChain,
+    NotTrusted, NotCaInChain, PathLengthExceeded, KeyUsageViolation,
+}
+
+/// Verify `chain[0]` (leaf) against `roots`. `now` is epoch seconds.
+/// `verify_sig` is a callback performing real RSA/ECDSA verification
+/// against cert.signed_tbs with the issuer's public key.
+pub fn verify_chain(chain: list, roots: list, now: int,
+                    verify_sig: fn(list, list, list) -> bool) -> ValidationError? {
+    if len(chain) == 0 { return ValidationError::BadChain }
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+    while i < len(chain) {
+        let cert = chain[i]
+        if now < cert.not_before { return ValidationError::NotYetValid }
+        if now > cert.not_after  { return ValidationError::Expired }
+        if i > 0 && !cert.is_ca  { return ValidationError::NotCaInChain }
+        if cert.path_length >= 0 && cert.path_length < (len(chain) - 1 - i) {
+            return ValidationError::PathLengthExceeded
+        }
+        // Leaf key-usage check.
+        if i == 0 {
+            let mut has_ds = false
+            for u in cert.key_usage { if u == "digitalSignature" { has_ds = true } }
+            if !has_ds && len(cert.key_usage) > 0 {
+                return ValidationError::KeyUsageViolation
+            }
+        }
+        let issuer = if i + 1 < len(chain) { chain[i + 1] } else { find_trust_anchor(cert.issuer, roots) }
+        if issuer == null { return ValidationError::NotTrusted }
+        if cert.issuer != issuer.subject { return ValidationError::BadChain }
+        if !verify_sig(issuer.public_key, cert.signed_tbs, cert.signature) {
+            return ValidationError::BadSignature
+        }
         i += 1
     }
-    return output
+    return null     // valid
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+fn find_trust_anchor(issuer_name: str, roots: list) -> Cert? {
+    for r in roots {
+        if r.subject == issuer_name && r.is_ca { return r }
     }
-    return result
-}
-
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Certificate Verification: " + to_hex(output))
+    return null
 }
