@@ -1,30 +1,97 @@
-// Crypto: Elliptic Curve Cryptography
-// Category: Asymmetric
+// crypto/asymmetric/elliptic_curve.ltl — EC arithmetic over prime fields.
+//
+// An elliptic curve in short Weierstrass form over F_p is the set of
+// (x, y) satisfying y² ≡ x³ + ax + b (mod p), plus a "point at
+// infinity" O that acts as the group identity.
+//
+// The addition law is geometric: draw a line through P and Q, it hits
+// the curve at a third point R; reflect over the x-axis to get P+Q.
+// Algebraically this becomes the formulas below. The group order is
+// ≈ p; ECDLP is believed to need 2^(n/2) work for an n-bit group —
+// so a 256-bit curve gives 128-bit security (ECC vs 3072-bit RSA).
+//
+// Standard curves (all use prime-order subgroups):
+//   • secp256k1 — Bitcoin, Ethereum. a = 0, b = 7.
+//   • secp256r1 / NIST P-256 — TLS default, U.S. federal.
+//   • Curve25519 — Signal, Tor, WireGuard. Montgomery form.
+//   • Ed25519 — EdDSA signatures, SSH, modern PGP.
+//
+// This implementation uses affine coordinates (teaching-oriented).
+// Real code uses Jacobian or Montgomery ladders with constant-time
+// scalar multiplication to defeat side-channel attacks.
+
 module crypto.asymmetric.elliptic_curve
 
-pub fn process(data: list) -> list {
-    // Elliptic Curve Cryptography implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+use crypto.asymmetric.rsa_simple   // mod_inverse, mod_pow
+
+pub struct Curve { pub p: int, pub a: int, pub b: int, pub gx: int, pub gy: int, pub n: int }
+pub struct Point { pub x: int, pub y: int, pub infinity: bool }
+
+// secp256k1 parameters (Bitcoin).
+pub const SECP256K1: Curve = Curve {
+    p: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F,
+    a: 0,
+    b: 7,
+    gx: 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+    gy: 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
+    n: 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141,
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn infinity() -> Point { return Point { x: 0, y: 0, infinity: true } }
+
+pub fn on_curve(c: Curve, p: Point) -> bool {
+    if p.infinity { return true }
+    let lhs = (p.y * p.y) % c.p
+    let mut rhs = (p.x * p.x) % c.p
+    rhs = (rhs * p.x + c.a * p.x + c.b) % c.p
+    return lhs == rhs
+}
+
+pub fn add(c: Curve, p: Point, q: Point) -> Point {
+    if p.infinity { return q }
+    if q.infinity { return p }
+    if p.x == q.x {
+        if (p.y + q.y) % c.p == 0 { return infinity() }   // P + (-P)
+        return double(c, p)
+    }
+    let num = (q.y - p.y) % c.p
+    let den = (q.x - p.x) % c.p
+    let m = (num * rsa_simple.mod_inverse(den, c.p)) % c.p
+    let x = (m * m - p.x - q.x) % c.p
+    let y = (m * (p.x - x) - p.y) % c.p
+    return Point { x: ((x % c.p) + c.p) % c.p, y: ((y % c.p) + c.p) % c.p, infinity: false }
+}
+
+pub fn double(c: Curve, p: Point) -> Point {
+    if p.infinity || p.y == 0 { return infinity() }
+    let num = (3 * p.x * p.x + c.a) % c.p
+    let den = (2 * p.y) % c.p
+    let m = (num * rsa_simple.mod_inverse(den, c.p)) % c.p
+    let x = (m * m - 2 * p.x) % c.p
+    let y = (m * (p.x - x) - p.y) % c.p
+    return Point { x: ((x % c.p) + c.p) % c.p, y: ((y % c.p) + c.p) % c.p, infinity: false }
+}
+
+/// Scalar multiplication via double-and-add. NOT constant-time.
+pub fn scalar_mul(c: Curve, k: int, p: Point) -> Point {
+    let mut result = infinity()
+    let mut addend = p
+    let mut n = k
+    while n > 0 {
+        if (n & 1) == 1 { result = add(c, result, addend) }
+        addend = double(c, addend)
+        n = n >> 1
     }
     return result
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Elliptic Curve Cryptography: " + to_hex(output))
+pub fn generator(c: Curve) -> Point {
+    return Point { x: c.gx, y: c.gy, infinity: false }
+}
+
+pub fn derive_public_key(c: Curve, private_key: int) -> Point {
+    if private_key <= 0 || private_key >= c.n {
+        throw Error("EC: private key out of range")
+    }
+    return scalar_mul(c, private_key, generator(c))
 }
