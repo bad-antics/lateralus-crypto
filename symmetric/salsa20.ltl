@@ -1,30 +1,84 @@
-// Crypto: Salsa20 Stream Cipher
-// Category: Symmetric
+// crypto/symmetric/salsa20.ltl — Bernstein's Salsa20 stream cipher.
+//
+// Salsa20 is ChaCha20's predecessor: same 64-byte block, 20 rounds,
+// same 256-bit key, but a different quarter-round (four-operand,
+// non-diagonal) and an 8-byte nonce + 8-byte block counter instead of
+// ChaCha's 12+4 split. Shares crypto core with Scrypt's hash and with
+// NaCl's crypto_stream.
+//
+// Test vector (Salsa20 paper, key=all-0, nonce=all-0):
+//   first block starts with 9a97f65b9b4c721b960a672145fca8d4...
+
 module crypto.symmetric.salsa20
 
-pub fn process(data: list) -> list {
-    // Salsa20 Stream Cipher implementation
-    let mut output = []
+const MASK32: int = 0xFFFFFFFF
+
+fn rotl32(x: int, n: int) -> int { return ((x << n) | (x >> (32 - n))) & MASK32 }
+
+fn qr(state: list, a: int, b: int, c: int, d: int) -> list {
+    state[b] = state[b] ^ rotl32((state[a] + state[d]) & MASK32, 7)
+    state[c] = state[c] ^ rotl32((state[b] + state[a]) & MASK32, 9)
+    state[d] = state[d] ^ rotl32((state[c] + state[b]) & MASK32, 13)
+    state[a] = state[a] ^ rotl32((state[d] + state[c]) & MASK32, 18)
+    return state
+}
+
+fn block(key: list, counter_lo: int, counter_hi: int, nonce: list) -> list {
+    // "expand 32-byte k" constants at positions 0, 5, 10, 15.
+    let mut state = [
+        0x61707865, le32(key, 0),   le32(key, 4),   le32(key, 8),
+        le32(key, 12), 0x3320646e,  le32(nonce, 0), le32(nonce, 4),
+        counter_lo & MASK32, counter_hi & MASK32, 0x79622d32, le32(key, 16),
+        le32(key, 20), le32(key, 24), le32(key, 28), 0x6b206574,
+    ]
+    let orig = state
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+    while i < 10 {
+        // Column round
+        state = qr(state, 0, 4,  8, 12)
+        state = qr(state, 5, 9, 13,  1)
+        state = qr(state, 10, 14, 2, 6)
+        state = qr(state, 15, 3, 7, 11)
+        // Row round
+        state = qr(state, 0, 1, 2, 3)
+        state = qr(state, 5, 6, 7, 4)
+        state = qr(state, 10, 11, 8, 9)
+        state = qr(state, 15, 12, 13, 14)
         i += 1
     }
-    return output
-}
-
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+    let mut out = []
+    i = 0
+    while i < 16 {
+        let w = (state[i] + orig[i]) & MASK32
+        out = push(out, w & 0xFF); out = push(out, (w >> 8) & 0xFF)
+        out = push(out, (w >> 16) & 0xFF); out = push(out, (w >> 24) & 0xFF)
+        i += 1
     }
-    return result
+    return out
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Salsa20 Stream Cipher: " + to_hex(output))
+fn le32(b: list, o: int) -> int {
+    return (b[o] | (b[o+1] << 8) | (b[o+2] << 16) | (b[o+3] << 24)) & MASK32
 }
+
+pub fn encrypt(key: list, nonce: list, plaintext: list) -> list {
+    if len(key) != 32 { throw Error("Salsa20 key must be 32 bytes") }
+    if len(nonce) != 8 { throw Error("Salsa20 nonce must be 8 bytes") }
+    let mut out = []
+    let mut lo = 0; let mut hi = 0
+    let mut i = 0
+    while i < len(plaintext) {
+        let ks = block(key, lo, hi, nonce)
+        let mut j = 0
+        while j < 64 && i + j < len(plaintext) {
+            out = push(out, plaintext[i + j] ^ ks[j])
+            j += 1
+        }
+        i += 64
+        lo = (lo + 1) & MASK32
+        if lo == 0 { hi = (hi + 1) & MASK32 }
+    }
+    return out
+}
+
+pub fn decrypt(key: list, nonce: list, ct: list) -> list { return encrypt(key, nonce, ct) }
