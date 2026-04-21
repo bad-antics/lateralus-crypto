@@ -1,30 +1,154 @@
-// Crypto: GCM Encryption Mode
-// Category: Modes
+// crypto/modes/gcm_mode.ltl — Galois/Counter Mode AEAD (NIST SP 800-38D).
+//
+// GCM = AES-CTR + GHASH, the most widely deployed AEAD cipher: TLS
+// 1.2+, IPsec, SSH, S/MIME, QUIC, Signal, Tor, WhatsApp. It encrypts
+// with CTR mode and authenticates (ciphertext || AAD || lengths) with
+// GHASH, a universal hash over GF(2¹²⁸). The tag is 16 bytes. IV
+// length should be 96 bits (12 bytes); with a 96-bit IV the counter
+// starts at IV||0x00000001.
+//
+// CRITICAL: never reuse (key, IV). A single (K, IV) collision lets an
+// attacker forge messages and sometimes recover the authentication key.
+// With random 96-bit IVs and the same key, the birthday bound is 2⁴⁸
+// messages; for higher volume, use XChaCha20-Poly1305 or AES-GCM-SIV.
+
 module crypto.modes.gcm_mode
 
-pub fn process(data: list) -> list {
-    // GCM Encryption Mode implementation
-    let mut output = []
+use crypto.symmetric.aes_simple
+
+const BLOCK: int = 16
+const REDUCTION: int = 0xE1000000000000000000000000000000   // 0xE1 || 0^120
+
+pub struct AeadResult { pub ciphertext: list, pub tag: list }
+
+pub fn encrypt(key: list, iv: list, aad: list, plaintext: list) -> AeadResult {
+    let h = aes_simple.encrypt_block(key, zeros(BLOCK))   // GHASH subkey
+    let j0 = compute_j0(h, iv)
+    // Encrypt with CTR, starting counter at inc32(J0).
+    let ct = gctr(key, inc32(j0), plaintext)
+    // Authenticate AAD || CT || u64(AAD bits) || u64(CT bits).
+    let mut auth_data = pad_to_block(aad) + pad_to_block(ct)
+    auth_data = auth_data + be64_bytes(len(aad) * 8) + be64_bytes(len(ct) * 8)
+    let s = ghash(h, auth_data)
+    // Tag = E_K(J0) XOR S, truncated to 16 bytes.
+    let t_pad = aes_simple.encrypt_block(key, j0)
+    let mut tag = []
+    let mut i = 0
+    while i < BLOCK { tag = push(tag, s[i] ^ t_pad[i]); i += 1 }
+    return AeadResult { ciphertext: ct, tag: tag }
+}
+
+pub fn decrypt(key: list, iv: list, aad: list, ciphertext: list, tag: list) -> list {
+    let h = aes_simple.encrypt_block(key, zeros(BLOCK))
+    let j0 = compute_j0(h, iv)
+    // Verify tag FIRST (constant-time) before releasing plaintext.
+    let mut auth_data = pad_to_block(aad) + pad_to_block(ciphertext)
+    auth_data = auth_data + be64_bytes(len(aad) * 8) + be64_bytes(len(ciphertext) * 8)
+    let s = ghash(h, auth_data)
+    let t_pad = aes_simple.encrypt_block(key, j0)
+    let mut expected_tag = []
+    let mut i = 0
+    while i < BLOCK { expected_tag = push(expected_tag, s[i] ^ t_pad[i]); i += 1 }
+    let mut diff = 0
+    i = 0
+    while i < 16 { diff = diff | (expected_tag[i] ^ tag[i]); i += 1 }
+    if diff != 0 { throw Error("GCM: authentication failed") }
+    return gctr(key, inc32(j0), ciphertext)
+}
+
+fn compute_j0(h: list, iv: list) -> list {
+    if len(iv) == 12 {
+        // Standard case: J0 = IV || 0x00000001
+        return iv + [0x00, 0x00, 0x00, 0x01]
+    }
+    // General case: J0 = GHASH(H, IV || 0s || u64(len(IV) in bits))
+    let mut data = pad_to_block(iv)
+    data = data + be64_bytes(0) + be64_bytes(len(iv) * 8)
+    return ghash(h, data)
+}
+
+fn gctr(key: list, initial_cb: list, data: list) -> list {
+    let mut out = []
+    let mut cb = initial_cb
     let mut i = 0
     while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+        let ks = aes_simple.encrypt_block(key, cb)
+        let mut j = 0
+        while j < BLOCK && i + j < len(data) {
+            out = push(out, data[i + j] ^ ks[j])
+            j += 1
+        }
+        i += BLOCK
+        cb = inc32(cb)
     }
-    return output
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+fn ghash(h: list, data: list) -> list {
+    // Multiply-and-XOR over GF(2¹²⁸) with polynomial x¹²⁸ + x⁷ + x² + x + 1.
+    let h_int = bytes_to_int(h)
+    let mut y = 0
+    let mut i = 0
+    while i < len(data) {
+        let block_int = bytes_to_int(slice(data, i, i + BLOCK))
+        y = gf128_mul(y ^ block_int, h_int)
+        i += BLOCK
     }
-    return result
+    return int_to_bytes(y, BLOCK)
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("GCM Encryption Mode: " + to_hex(output))
+fn gf128_mul(x: int, y: int) -> int {
+    let mut z = 0; let mut v = y
+    let mut i = 127
+    while i >= 0 {
+        if ((x >> i) & 1) != 0 { z = z ^ v }
+        let lsb = v & 1
+        v = v >> 1
+        if lsb != 0 { v = v ^ REDUCTION }
+        i -= 1
+    }
+    return z
+}
+
+fn inc32(block: list) -> list {
+    let mut out = slice(block, 0, BLOCK - 4)
+    let ctr = (block[12] << 24) | (block[13] << 16) | (block[14] << 8) | block[15]
+    let new_ctr = (ctr + 1) & 0xFFFFFFFF
+    out = push(out, (new_ctr >> 24) & 0xFF)
+    out = push(out, (new_ctr >> 16) & 0xFF)
+    out = push(out, (new_ctr >> 8) & 0xFF)
+    out = push(out, new_ctr & 0xFF)
+    return out
+}
+
+fn pad_to_block(data: list) -> list {
+    let mut out = data
+    while (len(out) % BLOCK) != 0 { out = push(out, 0) }
+    return out
+}
+
+fn zeros(n: int) -> list {
+    let mut v = []; let mut i = 0
+    while i < n { v = push(v, 0); i += 1 }
+    return v
+}
+
+fn be64_bytes(v: int) -> list {
+    let mut out = []
+    let mut b = 7
+    while b >= 0 { out = push(out, (v >> (b * 8)) & 0xFF); b -= 1 }
+    return out
+}
+
+fn bytes_to_int(bytes: list) -> int {
+    let mut v = 0
+    for byte in bytes { v = (v << 8) | byte }
+    return v
+}
+
+fn int_to_bytes(v: int, n: int) -> list {
+    let mut out = []
+    let mut b = n - 1
+    while b >= 0 { out = push(out, (v >> (b * 8)) & 0xFF); b -= 1 }
+    return out
 }
