@@ -1,41 +1,54 @@
-// ────────────────────────────────────────────────────────────
-// Simplified Hash Function
-// ────────────────────────────────────────────────────────────
+// crypto/hash/sha256_simple.ltl — thin ergonomic wrapper over sha256.
+//
+// Exposes one-shot helpers:  hash_bytes(), hash_string(), hex_digest().
+// The heavy lifting — FIPS 180-4 Merkle–Damgård construction with the
+// constants K[0..63] and initial vector H[0..7] — lives in
+// crypto/hash/sha256.ltl. Keep this file a façade so callers that just
+// need "give me the digest" don't pull in the whole module surface.
+//
+// If you are implementing HMAC, PBKDF2, HKDF, ECDSA, or protocol
+// transcripts: import the FULL module (crypto.hash.sha256) to access
+// the incremental Context API (init / update / finalize). That API is
+// required for streaming hashes over data that won't fit in memory
+// and for HMAC's ipad/opad two-pass construction.
 
-pub fn simple_hash(data: str, size: int) -> int {
-    let mut hash = 5381
-    for ch in data {
-        hash = ((hash * 33) + ord(ch)) % size
-    }
-    return hash
+module crypto.hash.sha256_simple
+
+use crypto.hash.sha256
+use crypto.encoding.hex_codec
+
+/// One-shot hash of a byte list. Digest is 32 bytes.
+pub fn hash_bytes(data: list) -> list {
+    return sha256.hash(data)
 }
 
-pub fn hash_hex(data: str) -> str {
-    let mut h1 = 0; let mut h2 = 0; let mut h3 = 0; let mut h4 = 0
-    for ch in data {
-        h1 = (h1 * 31 + ord(ch)) % 65536
-        h2 = (h2 * 37 + ord(ch)) % 65536
-        h3 = (h3 * 41 + ord(ch)) % 65536
-        h4 = (h4 * 43 + ord(ch)) % 65536
-    }
-    let hex_chars = "0123456789abcdef"
-    let mut result = ""
-    for h in [h1, h2, h3, h4] {
-        let mut val = h
-        let mut hex_part = ""
-        let mut i = 0
-        while i < 4 {
-            hex_part = hex_chars[val % 16] as str + hex_part
-            val = val / 16
-            i += 1
-        }
-        result += hex_part
-    }
-    return result
+/// One-shot hash of a UTF-8 string.
+pub fn hash_string(s: str) -> list {
+    return sha256.hash(str_to_bytes(s))
+}
+
+/// Lowercase hex digest — convenient for logging / comparison.
+pub fn hex_digest(data: list) -> str {
+    return hex_codec.encode(sha256.hash(data))
+}
+
+/// Constant-time digest comparison — use when verifying a digest
+/// received from an untrusted source to avoid timing side-channels.
+pub fn digest_equal(a: list, b: list) -> bool {
+    if len(a) != len(b) { return false }
+    let mut diff = 0
+    let mut i = 0
+    while i < len(a) { diff = diff | (a[i] ^ b[i]); i += 1 }
+    return diff == 0
+}
+
+fn str_to_bytes(s: str) -> list {
+    let mut out = []
+    for byte in s.bytes() { out = push(out, byte) }
+    return out
 }
 
 fn main() {
-    println("Hash of 'hello': " + hash_hex("hello"))
-    println("Hash of 'Hello': " + hash_hex("Hello"))
-    println("Hash of 'hellp': " + hash_hex("hellp"))
+    // FIPS 180-4 test: SHA-256("abc") = ba7816bf...b00361a396177a9cb410ff61f20015ad
+    println(hex_digest(str_to_bytes("abc")))
 }
