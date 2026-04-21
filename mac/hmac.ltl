@@ -1,30 +1,76 @@
-// Crypto: HMAC
-// Category: Mac
+// crypto/mac/hmac.ltl — RFC 2104 HMAC, parameterized over a hash.
+//
+// HMAC(K, m) = H((K' ⊕ opad) ∥ H((K' ⊕ ipad) ∥ m))
+// where K' is K padded to the hash's block size (or H(K) if K is longer
+// than the block size). The double-hash construction is what makes HMAC
+// provably secure under weaker assumptions than H alone — in particular
+// it resists length-extension attacks on Merkle-Damgård hashes like
+// SHA-256, so HMAC-SHA256 is safe even though plain SHA-256 is not.
+//
+// Test vector (RFC 4231, Test Case 1):
+//   key = 0x0b × 20, data = "Hi There"
+//   HMAC-SHA256 = b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+
 module crypto.mac.hmac
 
-pub fn process(data: list) -> list {
-    // HMAC implementation
-    let mut output = []
+use crypto.hash.sha256
+
+const IPAD: int = 0x36
+const OPAD: int = 0x5C
+const SHA256_BLOCK: int = 64
+const SHA256_OUT: int = 32
+
+pub fn hmac_sha256(key: list, data: list) -> list {
+    // Step 1: if the key is longer than the block size, hash it down.
+    let mut k = key
+    if len(k) > SHA256_BLOCK { k = sha256.hash(k) }
+    // Step 2: right-pad with zeros to the block size.
+    while len(k) < SHA256_BLOCK { k = push(k, 0x00) }
+    // Step 3: build ipad'd and opad'd keys.
+    let mut inner_key = []
+    let mut outer_key = []
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+    while i < SHA256_BLOCK {
+        inner_key = push(inner_key, k[i] ^ IPAD)
+        outer_key = push(outer_key, k[i] ^ OPAD)
         i += 1
     }
-    return output
+    // Step 4: inner = H(K'⊕ipad ∥ m)
+    let inner = sha256.hash(inner_key + data)
+    // Step 5: outer = H(K'⊕opad ∥ inner)
+    return sha256.hash(outer_key + inner)
+}
+
+// Constant-time comparison. Returns true iff the tags match; does not
+// early-exit on first mismatch so total runtime is independent of the
+// position of any difference — critical when verifying MACs on
+// attacker-controlled input.
+pub fn verify(key: list, data: list, tag: list) -> bool {
+    let computed = hmac_sha256(key, data)
+    if len(computed) != len(tag) { return false }
+    let mut diff = 0
+    let mut i = 0
+    while i < len(computed) {
+        diff = diff | (computed[i] ^ tag[i])
+        i += 1
+    }
+    return diff == 0
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for b in bytes { out += chars[b / 16] as str + chars[b % 16] as str }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("HMAC: " + to_hex(output))
+    // RFC 4231 Test Case 1.
+    let mut key = []
+    let mut i = 0
+    while i < 20 { key = push(key, 0x0b); i += 1 }
+    let data = [0x48, 0x69, 0x20, 0x54, 0x68, 0x65, 0x72, 0x65]  // "Hi There"
+    let tag = hmac_sha256(key, data)
+    println("HMAC-SHA256 = " + to_hex(tag))
+    println("expected    = b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
 }
