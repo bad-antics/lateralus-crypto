@@ -1,30 +1,110 @@
-// Crypto: Bloom Filter (Cryptographic)
-// Category: Structures
+// crypto/structures/bloom_filter_crypto.ltl — crypto-strength Bloom filter.
+//
+// A Bloom filter is a probabilistic set supporting insert + probably-
+// contains queries in O(k) time and n·ln(1/ε) / ln(2)² bits of space.
+// Never false-negatives; false-positive rate ε is tunable.
+//
+// Ordinary Bloom filters use cheap non-cryptographic hashes (MurmurHash,
+// xxHash) which leak set membership: Kumar & Crowcroft (2005) showed
+// FNV/Murmur filters can be reversed given enough queries. For
+// privacy-critical uses — password blacklists, private set
+// intersection, anonymous blacklists like Google Safe Browsing — use
+// KEYED cryptographic hashing: HMAC-SHA-256 with a per-filter secret
+// key. This is the "cryptographic Bloom filter" (Nojima & Kadobayashi
+// 2009; Goh's Z-IDX; used internally by some password-breach checks).
+//
+// Trade-off: HMAC is ~100× slower than Murmur. Optimizations:
+//   • Double-hashing trick (Kirsch & Mitzenmacher 2006): derive all k
+//     indices from a single HMAC output split into halves.
+//   • Compressed counting variants (spectral Bloom, cuckoo).
+
 module crypto.structures.bloom_filter_crypto
 
-pub fn process(data: list) -> list {
-    // Bloom Filter (Cryptographic) implementation
-    let mut output = []
+use crypto.mac.hmac
+use crypto.hash.sha256
+
+pub struct CryptoBloom {
+    pub bits: list,       // bit-packed, 8 per byte
+    pub num_bits: int,
+    pub num_hashes: int,
+    pub key: list,        // HMAC secret
+}
+
+pub fn create(expected_items: int, false_positive_rate: float, key: list) -> CryptoBloom {
+    if len(key) < 16 { throw Error("Bloom key must be ≥ 16 bytes") }
+    // Optimal parameters: m = -n·ln(p) / (ln 2)², k = (m/n)·ln 2.
+    let m = optimal_m(expected_items, false_positive_rate)
+    let k = optimal_k(m, expected_items)
+    let byte_len = (m + 7) / 8
+    let mut bits = []
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
+    while i < byte_len { bits = push(bits, 0); i += 1 }
+    return CryptoBloom { bits: bits, num_bits: m, num_hashes: k, key: key }
+}
+
+pub fn add(bf: CryptoBloom, item: list) -> CryptoBloom {
+    let (h1, h2) = double_hash(bf.key, item)
+    let mut new_bits = bf.bits
+    let mut i = 0
+    while i < bf.num_hashes {
+        let idx = ((h1 + i * h2) % bf.num_bits + bf.num_bits) % bf.num_bits
+        new_bits = set_bit(new_bits, idx)
         i += 1
     }
-    return output
+    return CryptoBloom { bits: new_bits, num_bits: bf.num_bits,
+                         num_hashes: bf.num_hashes, key: bf.key }
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn contains(bf: CryptoBloom, item: list) -> bool {
+    let (h1, h2) = double_hash(bf.key, item)
+    let mut i = 0
+    while i < bf.num_hashes {
+        let idx = ((h1 + i * h2) % bf.num_bits + bf.num_bits) % bf.num_bits
+        if !get_bit(bf.bits, idx) { return false }
+        i += 1
     }
-    return result
+    return true
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Bloom Filter (Cryptographic): " + to_hex(output))
+/// Kirsch–Mitzenmacher: one HMAC → two 32-bit halves → k indices.
+fn double_hash(key: list, item: list) -> (int, int) {
+    let mac = hmac.compute(key, item)
+    let h1 = (mac[0] << 24) | (mac[1] << 16) | (mac[2] << 8) | mac[3]
+    let h2 = (mac[4] << 24) | (mac[5] << 16) | (mac[6] << 8) | mac[7]
+    return (h1, if h2 == 0 { 1 } else { h2 })   // avoid h2 == 0 degenerating
+}
+
+fn set_bit(bits: list, idx: int) -> list {
+    let byte_idx = idx / 8; let bit_idx = idx % 8
+    let mut out = bits
+    out[byte_idx] = out[byte_idx] | (1 << bit_idx)
+    return out
+}
+
+fn get_bit(bits: list, idx: int) -> bool {
+    let byte_idx = idx / 8; let bit_idx = idx % 8
+    return (bits[byte_idx] & (1 << bit_idx)) != 0
+}
+
+fn optimal_m(n: int, p: float) -> int {
+    // m ≈ -n · ln(p) / (ln 2)²  ≈  -n · ln(p) · 2.0813
+    // Without floats we approximate with a fixed table indexed by p.
+    let ln2_sq_inv_scaled = 2081   // 2.0813 × 1000
+    let ln_p_scaled = approx_neg_ln(p)   // -ln(p) × 1000
+    return (n * ln_p_scaled * ln2_sq_inv_scaled) / 1000000
+}
+
+fn optimal_k(m: int, n: int) -> int {
+    // k ≈ (m/n) · ln(2) = (m/n) × 0.6931
+    let k = (m * 693) / (n * 1000)
+    return if k < 1 { 1 } else { k }
+}
+
+fn approx_neg_ln(p: float) -> int {
+    // Fast table for common p values.
+    if p <= 0.001 { return 6908 }
+    if p <= 0.01  { return 4605 }
+    if p <= 0.05  { return 2996 }
+    if p <= 0.1   { return 2303 }
+    return 1609
 }
