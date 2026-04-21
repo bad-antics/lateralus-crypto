@@ -1,30 +1,70 @@
-// Crypto: CTR Encryption Mode
-// Category: Modes
+// crypto/modes/ctr_mode.ltl — Counter mode (NIST SP 800-38A §6.5).
+//
+// CTR turns a block cipher into a stream cipher by encrypting a
+// counter block E(nonce || counter) and XORing the output with the
+// plaintext. Parallelizable in both directions, no padding needed, no
+// error propagation — but absolutely requires a unique (key, nonce)
+// pair forever. Nonce reuse with the same key is catastrophic: XOR
+// two ciphertexts and you get the XOR of the plaintexts.
+//
+// Best practice: use a 96-bit random nonce + 32-bit counter for AES.
+// For long-running streams, rotate keys before the counter wraps.
+
 module crypto.modes.ctr_mode
 
-pub fn process(data: list) -> list {
-    // CTR Encryption Mode implementation
-    let mut output = []
+use crypto.symmetric.aes_simple
+
+const BLOCK: int = 16
+
+pub fn encrypt(key: list, nonce: list, initial_counter: int, plaintext: list) -> list {
+    return xor_stream(key, nonce, initial_counter, plaintext)
+}
+
+pub fn decrypt(key: list, nonce: list, initial_counter: int, ciphertext: list) -> list {
+    return xor_stream(key, nonce, initial_counter, ciphertext)
+}
+
+fn xor_stream(key: list, nonce: list, initial_counter: int, data: list) -> list {
+    if len(nonce) > BLOCK { throw Error("CTR nonce must be ≤ 16 bytes") }
+    let counter_size = BLOCK - len(nonce)
+    if counter_size < 4 { throw Error("CTR counter must be ≥ 4 bytes") }
+    let mut out = []
+    let mut ctr = initial_counter
+    let max_counter = 1 << (counter_size * 8)
     let mut i = 0
     while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+        // Construct the counter block: nonce || big-endian ctr.
+        let mut cb = nonce
+        let mut b = counter_size - 1
+        while b >= 0 { cb = push(cb, (ctr >> (b * 8)) & 0xFF); b -= 1 }
+        let ks = aes_simple.encrypt_block(key, cb)
+        let mut j = 0
+        while j < BLOCK && i + j < len(data) {
+            out = push(out, data[i + j] ^ ks[j])
+            j += 1
+        }
+        i += BLOCK
+        ctr = (ctr + 1) % max_counter
+        if ctr == initial_counter && i < len(data) {
+            throw Error("CTR: counter wrapped — rotate key before continuing")
+        }
     }
-    return output
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
-}
-
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("CTR Encryption Mode: " + to_hex(output))
+/// Seekable CTR: start decryption at an arbitrary byte offset without
+/// decrypting preceding blocks. Useful for encrypted file-system reads.
+pub fn decrypt_range(key: list, nonce: list, initial_counter: int,
+                     offset: int, ciphertext: list) -> list {
+    let block_idx = offset / BLOCK
+    let into_block = offset % BLOCK
+    let start_ctr = initial_counter + block_idx
+    // Generate one extra block's worth of keystream to cover the partial
+    // leading block, then trim.
+    let mut padded = []
+    let mut i = 0
+    while i < into_block { padded = push(padded, 0); i += 1 }
+    padded = padded + ciphertext
+    let decrypted = decrypt(key, nonce, start_ctr, padded)
+    return slice(decrypted, into_block, len(decrypted))
 }
