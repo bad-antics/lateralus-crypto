@@ -1,47 +1,87 @@
-// crypto/encoding/base64_encode.ltl — Thin wrapper re-exporting `base64`.
+// crypto/encoding/base64_encode.ltl — RFC 4648 Base64 (standard alphabet).
 //
-// A few toolchains (MIME parsers, legacy email gateways) import a
-// module literally named `base64_encode` by historical convention.
-// This file re-exports the full codec from `encoding/base64` so
-// external consumers don't break. All real logic lives next door.
+// Base64 encodes 3 bytes into 4 printable characters by chunking input
+// into 6-bit groups. Padding with "=" brings the output length up to a
+// multiple of 4 whenever the input isn't a multiple of 3. The standard
+// alphabet uses +/; see `url_safe_base64` for the URL-safe variant
+// that uses -_ instead.
+//
+// Base64 is not encryption — it's just a way to push arbitrary bytes
+// through text-only channels (email, JSON, URLs). It expands data by
+// 33%, so never use it when size matters and a binary channel is
+// available.
 
 module crypto.encoding.base64_encode
 
-use crypto.encoding.base64
+const ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-pub fn encode(data: list) -> str { return base64.encode(data) }
-pub fn encode_urlsafe(data: list) -> str { return base64.encode_urlsafe(data) }
-pub fn decode(s: str) -> list { return base64.decode(s) }
+pub fn encode(data: list) -> str {
+    let mut out = ""
+    let mut i = 0
+    let n = len(data)
+    while i + 3 <= n {
+        let a = data[i]; let b = data[i+1]; let c = data[i+2]
+        let v = (a << 16) | (b << 8) | c
+        out += ALPHABET[(v >> 18) & 0x3F] as str
+        out += ALPHABET[(v >> 12) & 0x3F] as str
+        out += ALPHABET[(v >>  6) & 0x3F] as str
+        out += ALPHABET[ v        & 0x3F] as str
+        i += 3
+    }
+    let rem = n - i
+    if rem == 1 {
+        let v = data[i] << 16
+        out += ALPHABET[(v >> 18) & 0x3F] as str
+        out += ALPHABET[(v >> 12) & 0x3F] as str
+        out += "=="
+    } else if rem == 2 {
+        let v = (data[i] << 16) | (data[i+1] << 8)
+        out += ALPHABET[(v >> 18) & 0x3F] as str
+        out += ALPHABET[(v >> 12) & 0x3F] as str
+        out += ALPHABET[(v >>  6) & 0x3F] as str
+        out += "="
+    }
+    return out
+}
 
-// Streaming encoder for large inputs — encodes 3-byte chunks as soon
-// as they arrive, flushes the final (possibly partial) chunk on close.
-// The FSM remembers how many bytes we've seen mod 3 so the caller can
-// feed bytes one at a time.
-pub struct StreamEncoder { carry: list, out: str }
-
-impl StreamEncoder {
-    pub fn new() -> StreamEncoder { return StreamEncoder { carry: [], out: "" } }
-    pub fn feed(self, chunk: list) {
-        let mut buf = self.carry + chunk
-        let whole = (len(buf) / 3) * 3
-        let mut i = 0
-        while i < whole {
-            self.out += base64.encode(slice(buf, i, i + 3))
-            i += 3
+pub fn decode(s: str) -> list {
+    // Build the reverse alphabet lookup once.
+    let mut rev = []
+    let mut k = 0
+    while k < 256 { rev = push(rev, -1); k += 1 }
+    let mut i = 0
+    while i < 64 {
+        let c = ALPHABET[i] as int
+        rev[c] = i
+        i += 1
+    }
+    let mut out = []
+    let mut buf = 0
+    let mut bits = 0
+    let mut j = 0
+    while j < len(s) {
+        let ch = s[j] as int
+        if ch == ('=' as int) { break }
+        let v = rev[ch]
+        if v < 0 { j += 1; continue }  // skip whitespace/newline
+        buf = (buf << 6) | v
+        bits += 6
+        if bits >= 8 {
+            bits -= 8
+            out = push(out, (buf >> bits) & 0xFF)
         }
-        self.carry = slice(buf, whole, len(buf))
+        j += 1
     }
-    pub fn finish(self) -> str {
-        if len(self.carry) > 0 { self.out += base64.encode(self.carry) }
-        self.carry = []
-        return self.out
-    }
+    return out
 }
 
 fn main() {
-    let enc = StreamEncoder.new()
-    enc.feed([0x48, 0x65])    // "He"
-    enc.feed([0x6c, 0x6c, 0x6f])  // "llo"
-    println("streaming = " + enc.finish())
-    println("expected  = SGVsbG8=")
+    let hello = [0x48, 0x65, 0x6c, 0x6c, 0x6f]  // "Hello"
+    let enc = encode(hello)
+    println("encode(\"Hello\") = " + enc)
+    println("expected        = SGVsbG8=")
+    let dec = decode(enc)
+    let mut back = ""
+    for b in dec { back += b as str }
+    println("decoded         = " + back)
 }
