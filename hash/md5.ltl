@@ -1,30 +1,106 @@
-// Crypto: MD5 Hash
-// Category: Hash
+// crypto/hash/md5.ltl — RFC 1321 MD5.
+//
+// MD5 is obsolete for security (collisions are trivial since 2004) but
+// is kept here for legacy interop: checksums, ETags, corrupted-download
+// detection, and hash tables keyed on content. Do NOT use MD5 for
+// passwords, signatures, or any adversarial setting — use `blake2` or
+// `sha256` instead. This implementation matches RFC 1321 Appendix A.
+//
+// Test vector: MD5("") = d41d8cd98f00b204e9800998ecf8427e
+
 module crypto.hash.md5
 
-pub fn process(data: list) -> list {
-    // MD5 Hash implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+const MASK32: int = 0xFFFFFFFF
+
+// Per-round shift amounts.
+const S: list = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+]
+
+// K[i] = floor(2³² · abs(sin(i+1))).  Precomputed per RFC 1321.
+const K: list = [
+    0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+    0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+    0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+    0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+    0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+    0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+    0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+    0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+]
+
+fn rol(x: int, n: int) -> int { return ((x << n) | (x >> (32 - n))) & MASK32 }
+
+pub fn hash(data: list) -> list {
+    let mut a0 = 0x67452301; let mut b0 = 0xefcdab89
+    let mut c0 = 0x98badcfe; let mut d0 = 0x10325476
+    let msg = pad(data)
+    let nblocks = len(msg) / 64
+    let mut blk = 0
+    while blk < nblocks {
+        // M[0..15] little-endian.
+        let mut m = []
+        let mut j = 0
+        while j < 16 {
+            let o = blk * 64 + j * 4
+            m = push(m, (msg[o] | (msg[o+1] << 8) | (msg[o+2] << 16) | (msg[o+3] << 24)) & MASK32)
+            j += 1
+        }
+        let mut a = a0; let mut b = b0; let mut c = c0; let mut d = d0
+        let mut i = 0
+        while i < 64 {
+            let mut f = 0; let mut g = 0
+            if i < 16 {
+                f = (b & c) | ((~b) & d); g = i
+            } else if i < 32 {
+                f = (d & b) | ((~d) & c); g = (5 * i + 1) % 16
+            } else if i < 48 {
+                f = b ^ c ^ d; g = (3 * i + 5) % 16
+            } else {
+                f = c ^ (b | (~d)); g = (7 * i) % 16
+            }
+            let temp = d
+            d = c; c = b
+            b = (b + rol((a + (f & MASK32) + K[i] + m[g]) & MASK32, S[i])) & MASK32
+            a = temp
+            i += 1
+        }
+        a0 = (a0 + a) & MASK32; b0 = (b0 + b) & MASK32
+        c0 = (c0 + c) & MASK32; d0 = (d0 + d) & MASK32
+        blk += 1
     }
-    return output
+    // MD5 output is little-endian concatenation of A,B,C,D.
+    return le32_bytes(a0) + le32_bytes(b0) + le32_bytes(c0) + le32_bytes(d0)
+}
+
+fn le32_bytes(x: int) -> list {
+    return [x & 0xFF, (x >> 8) & 0xFF, (x >> 16) & 0xFF, (x >> 24) & 0xFF]
+}
+
+fn pad(data: list) -> list {
+    let bit_len = len(data) * 8
+    let mut m = data
+    m = push(m, 0x80)
+    while (len(m) % 64) != 56 { m = push(m, 0x00) }
+    // 64-bit little-endian length.
+    let mut i = 0
+    while i < 8 { m = push(m, (bit_len >> (i * 8)) & 0xFF); i += 1 }
+    return m
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for b in bytes { out += chars[b / 16] as str + chars[b % 16] as str }
+    return out
 }
 
+pub fn hash_hex(data: list) -> str { return to_hex(hash(data)) }
+
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("MD5 Hash: " + to_hex(output))
+    println("MD5(\"\")    = " + to_hex(hash([])))
+    println("expected   = d41d8cd98f00b204e9800998ecf8427e")
 }
