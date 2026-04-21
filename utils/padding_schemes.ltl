@@ -1,30 +1,94 @@
-// Crypto: PKCS Padding Schemes
-// Category: Utils
+// crypto/utils/padding_schemes.ltl — PKCS#7, ISO/IEC 7816-4, zero padding.
+//
+// Padding schemes turn arbitrary-length plaintext into a whole number
+// of cipher blocks for CBC/ECB modes. The right choice matters — bad
+// padding reveals itself as an oracle (Vaudenay 2002) and lets an
+// attacker decrypt arbitrary ciphertext. The safest default is PKCS#7
+// with an authenticated mode (GCM, ChaCha20-Poly1305) so there's no
+// padding-oracle surface. When you must use CBC, use HMAC-then-encrypt
+// and verify the MAC BEFORE attempting to unpad.
+
 module crypto.utils.padding_schemes
 
-pub fn process(data: list) -> list {
-    // PKCS Padding Schemes implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+pub enum Scheme { Pkcs7, Iso7816, Zero, AnsiX923 }
+
+pub fn pad(data: list, block_size: int, scheme: Scheme) -> list {
+    if block_size < 1 || block_size > 255 { throw Error("block_size must be 1..255") }
+    let pad_len = block_size - (len(data) % block_size)
+    let mut out = data
+    match scheme {
+        Scheme::Pkcs7 => {
+            // Append pad_len bytes, each with value pad_len.
+            // Always adds padding — even to a whole-block input — so
+            // the unpadder can deterministically recognize the last block.
+            let mut i = 0
+            while i < pad_len { out = push(out, pad_len); i += 1 }
+        }
+        Scheme::Iso7816 => {
+            // Append 0x80 then zeros until block boundary.
+            out = push(out, 0x80)
+            let mut i = 1
+            while i < pad_len { out = push(out, 0x00); i += 1 }
+        }
+        Scheme::Zero => {
+            // Append zeros. Ambiguous for plaintext ending in zero bytes —
+            // use only for fixed-length fields where the true length is
+            // known out-of-band.
+            let mut i = 0
+            while i < pad_len { out = push(out, 0x00); i += 1 }
+        }
+        Scheme::AnsiX923 => {
+            // Zero-bytes then final byte = pad_len. Used in some older
+            // banking protocols and by the .NET Framework.
+            let mut i = 0
+            while i < pad_len - 1 { out = push(out, 0x00); i += 1 }
+            out = push(out, pad_len)
+        }
     }
-    return output
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn unpad(data: list, block_size: int, scheme: Scheme) -> list {
+    if len(data) == 0 || (len(data) % block_size) != 0 {
+        throw Error("unpad: input not block-aligned")
     }
-    return result
-}
-
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("PKCS Padding Schemes: " + to_hex(output))
+    match scheme {
+        Scheme::Pkcs7 => {
+            let n = data[len(data) - 1]
+            if n == 0 || n > block_size { throw Error("pkcs7: invalid padding byte") }
+            // Constant-time check: every trailing byte must equal n.
+            // Early exit would leak padding length to a timing attacker.
+            let mut bad = 0
+            let mut i = 0
+            while i < n {
+                bad = bad | (data[len(data) - 1 - i] ^ n)
+                i += 1
+            }
+            if bad != 0 { throw Error("pkcs7: inconsistent padding") }
+            return slice(data, 0, len(data) - n)
+        }
+        Scheme::Iso7816 => {
+            let mut i = len(data) - 1
+            while i >= 0 && data[i] == 0x00 { i -= 1 }
+            if i < 0 || data[i] != 0x80 { throw Error("iso7816: missing 0x80 marker") }
+            return slice(data, 0, i)
+        }
+        Scheme::Zero => {
+            // Cannot determine original length — just strip trailing zeros.
+            // Caller is responsible for knowing this is lossy.
+            let mut i = len(data) - 1
+            while i >= 0 && data[i] == 0x00 { i -= 1 }
+            return slice(data, 0, i + 1)
+        }
+        Scheme::AnsiX923 => {
+            let n = data[len(data) - 1]
+            if n == 0 || n > block_size { throw Error("ansix923: invalid length byte") }
+            let mut i = 1
+            while i < n {
+                if data[len(data) - 1 - i] != 0 { throw Error("ansix923: non-zero padding") }
+                i += 1
+            }
+            return slice(data, 0, len(data) - n)
+        }
+    }
 }
