@@ -1,30 +1,88 @@
-// Crypto: Digital Signature
-// Category: Protocols
+// crypto/protocols/digital_signature.ltl — ECDSA over secp256k1 (SEC 1).
+//
+// Elliptic-Curve Digital Signature Algorithm (ANSI X9.62, SEC 1, FIPS 186-4).
+// Sign:
+//   k ← random in [1, n-1]
+//   (x1, y1) = k·G
+//   r = x1 mod n
+//   s = k^(-1) · (H(m) + r·d) mod n
+//   signature = (r, s)
+// Verify:
+//   u1 = s^(-1) · H(m) mod n
+//   u2 = s^(-1) · r    mod n
+//   (x, y) = u1·G + u2·Q        (Q = d·G public key)
+//   valid iff r == x mod n
+//
+// CRITICAL: k must be UNIQUE, UNPREDICTABLE, SECRET. Reusing k across
+// two signatures leaks the private key — famously exploited against
+// Sony's PS3 (2010) and Bitcoin wallets with weak RNGs. Modern code
+// uses deterministic ECDSA (RFC 6979) — k = HMAC_SHA256(d, H(m)) — so
+// nonce quality no longer depends on the RNG.
+//
+// For new systems prefer EdDSA (Ed25519, RFC 8032): faster, simpler,
+// nonce-misuse resistant, used by SSH, WireGuard, and TLS 1.3.
+
 module crypto.protocols.digital_signature
 
-pub fn process(data: list) -> list {
-    // Digital Signature implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+use crypto.asymmetric.elliptic_curve
+use crypto.asymmetric.rsa_simple
+use crypto.hash.sha256
+
+pub struct Signature { pub r: int, pub s: int }
+
+pub fn sign(curve: elliptic_curve.Curve, d: int, msg: list, k: int) -> Signature {
+    if k <= 0 || k >= curve.n { throw Error("ECDSA: k out of range") }
+    let h = hash_to_int(msg, curve.n)
+    let kg = elliptic_curve.scalar_mul(curve, k, elliptic_curve.generator(curve))
+    let r = kg.x % curve.n
+    if r == 0 { throw Error("ECDSA: r == 0, choose new k") }
+    let k_inv = rsa_simple.mod_inverse(k, curve.n)
+    let s = (k_inv * ((h + r * d) % curve.n)) % curve.n
+    if s == 0 { throw Error("ECDSA: s == 0, choose new k") }
+    return Signature { r: r, s: s }
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+pub fn verify(curve: elliptic_curve.Curve, pubkey: elliptic_curve.Point,
+              msg: list, sig: Signature) -> bool {
+    if sig.r <= 0 || sig.r >= curve.n { return false }
+    if sig.s <= 0 || sig.s >= curve.n { return false }
+    let h = hash_to_int(msg, curve.n)
+    let w = rsa_simple.mod_inverse(sig.s, curve.n)
+    let u1 = (h * w) % curve.n
+    let u2 = (sig.r * w) % curve.n
+    let p1 = elliptic_curve.scalar_mul(curve, u1, elliptic_curve.generator(curve))
+    let p2 = elliptic_curve.scalar_mul(curve, u2, pubkey)
+    let point = elliptic_curve.add(curve, p1, p2)
+    if point.infinity { return false }
+    return (point.x % curve.n) == sig.r
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Digital Signature: " + to_hex(output))
+/// RFC 6979 deterministic k — defeats RNG failure and nonce reuse.
+/// k = HMAC-SHA256(d, H(m)) truncated to group order.
+pub fn deterministic_k(curve: elliptic_curve.Curve, d: int, msg: list) -> int {
+    use crypto.mac.hmac
+    let h = sha256.hash(msg)
+    let d_bytes = int_to_bytes(d, 32)
+    let mac = hmac.compute(d_bytes, h)
+    let mut k = bytes_to_int(mac) % (curve.n - 1)
+    if k == 0 { k = 1 }
+    return k
+}
+
+fn hash_to_int(msg: list, n: int) -> int {
+    let h = sha256.hash(msg)
+    return bytes_to_int(h) % n
+}
+
+fn bytes_to_int(b: list) -> int {
+    let mut v = 0
+    for byte in b { v = (v << 8) | byte }
+    return v
+}
+
+fn int_to_bytes(v: int, n: int) -> list {
+    let mut out = []
+    let mut i = n - 1
+    while i >= 0 { out = push(out, (v >> (i * 8)) & 0xFF); i -= 1 }
+    return out
 }
