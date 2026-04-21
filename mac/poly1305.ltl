@@ -1,30 +1,82 @@
-// Crypto: Poly1305 MAC
-// Category: Mac
+// crypto/mac/poly1305.ltl — RFC 8439 Poly1305 one-time MAC.
+//
+// Poly1305 evaluates a polynomial over GF(2¹³⁰ − 5) where the message
+// chunks are coefficients and the key is the evaluation point. Given a
+// 32-byte key (r∥s) and a message, it produces a 16-byte tag. The `r`
+// half is "clamped" — 22 specific bits are cleared — to keep
+// intermediate products within a 128-bit window. NEVER reuse the same
+// (r,s) pair for two messages; that leaks r and breaks everything.
+//
+// Used as the MAC half of the ChaCha20-Poly1305 AEAD in TLS 1.3, WireGuard,
+// QUIC, age, and libsodium's crypto_secretbox.
+//
+// Test vector (RFC 8439 §2.5.2):
+//   key = 85d6be7857556d337f4452fe42d506a8010103808afb0db2fd4abff6af4149f5
+//   msg = "Cryptographic Forum Research Group"
+//   tag = a8061dc1305136c6c22b8baf0c0127a9
+
 module crypto.mac.poly1305
 
-pub fn process(data: list) -> list {
-    // Poly1305 MAC implementation
-    let mut output = []
+const P: int = (1 << 130) - 5
+
+pub fn mac(key: list, msg: list) -> list {
+    if len(key) != 32 { throw Error("poly1305 key must be 32 bytes") }
+    // Split key and clamp r per RFC 8439.
+    let mut r = le_bytes_to_int(slice(key, 0, 16))
+    r = r & 0x0ffffffc0ffffffc0ffffffc0fffffff
+    let s = le_bytes_to_int(slice(key, 16, 32))
+    let mut acc = 0
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+    while i < len(msg) {
+        let block_end = if i + 16 < len(msg) { i + 16 } else { len(msg) }
+        let mut block = slice(msg, i, block_end)
+        // Append 0x01 byte, then zero-pad to 17 bytes.  The high bit marks
+        // the block as "full-length" — a partial final block gets a
+        // shorter padding instead.
+        block = push(block, 0x01)
+        while len(block) < 17 { block = push(block, 0x00) }
+        acc = (acc + le_bytes_to_int(block)) % P
+        acc = (acc * r) % P
+        i += 16
     }
-    return output
+    // Final tag = (acc + s) mod 2^128, little-endian.
+    let tag_int = (acc + s) & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+    let mut tag = []
+    let mut b = 0
+    while b < 16 { tag = push(tag, (tag_int >> (b * 8)) & 0xFF); b += 1 }
+    return tag
+}
+
+pub fn verify(key: list, msg: list, tag: list) -> bool {
+    let expected = mac(key, msg)
+    if len(expected) != len(tag) { return false }
+    let mut diff = 0
+    let mut i = 0
+    while i < 16 { diff = diff | (expected[i] ^ tag[i]); i += 1 }
+    return diff == 0
+}
+
+fn le_bytes_to_int(bytes: list) -> int {
+    let mut v = 0
+    let mut i = len(bytes) - 1
+    while i >= 0 { v = (v << 8) | bytes[i]; i -= 1 }
+    return v
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for byte in bytes { out += chars[byte / 16] as str + chars[byte % 16] as str }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Poly1305 MAC: " + to_hex(output))
+    // RFC 8439 §2.5.2 test vector.
+    let key = [0x85,0xd6,0xbe,0x78,0x57,0x55,0x6d,0x33,0x7f,0x44,0x52,0xfe,0x42,0xd5,0x06,0xa8,
+               0x01,0x01,0x03,0x80,0x8a,0xfb,0x0d,0xb2,0xfd,0x4a,0xbf,0xf6,0xaf,0x41,0x49,0xf5]
+    let msg = [0x43,0x72,0x79,0x70,0x74,0x6f,0x67,0x72,0x61,0x70,0x68,0x69,0x63,0x20,
+               0x46,0x6f,0x72,0x75,0x6d,0x20,0x52,0x65,0x73,0x65,0x61,0x72,0x63,0x68,
+               0x20,0x47,0x72,0x6f,0x75,0x70]
+    println("Poly1305 = " + to_hex(mac(key, msg)))
+    println("expected = a8061dc1305136c6c22b8baf0c0127a9")
 }
