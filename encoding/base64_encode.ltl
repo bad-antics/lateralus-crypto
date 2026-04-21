@@ -1,30 +1,47 @@
-// Crypto: Base64 Encoding
-// Category: Encoding
+// crypto/encoding/base64_encode.ltl — Thin wrapper re-exporting `base64`.
+//
+// A few toolchains (MIME parsers, legacy email gateways) import a
+// module literally named `base64_encode` by historical convention.
+// This file re-exports the full codec from `encoding/base64` so
+// external consumers don't break. All real logic lives next door.
+
 module crypto.encoding.base64_encode
 
-pub fn process(data: list) -> list {
-    // Base64 Encoding implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
-}
+use crypto.encoding.base64
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn encode(data: list) -> str { return base64.encode(data) }
+pub fn encode_urlsafe(data: list) -> str { return base64.encode_urlsafe(data) }
+pub fn decode(s: str) -> list { return base64.decode(s) }
+
+// Streaming encoder for large inputs — encodes 3-byte chunks as soon
+// as they arrive, flushes the final (possibly partial) chunk on close.
+// The FSM remembers how many bytes we've seen mod 3 so the caller can
+// feed bytes one at a time.
+pub struct StreamEncoder { carry: list, out: str }
+
+impl StreamEncoder {
+    pub fn new() -> StreamEncoder { return StreamEncoder { carry: [], out: "" } }
+    pub fn feed(self, chunk: list) {
+        let mut buf = self.carry + chunk
+        let whole = (len(buf) / 3) * 3
+        let mut i = 0
+        while i < whole {
+            self.out += base64.encode(slice(buf, i, i + 3))
+            i += 3
+        }
+        self.carry = slice(buf, whole, len(buf))
     }
-    return result
+    pub fn finish(self) -> str {
+        if len(self.carry) > 0 { self.out += base64.encode(self.carry) }
+        self.carry = []
+        return self.out
+    }
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Base64 Encoding: " + to_hex(output))
+    let enc = StreamEncoder.new()
+    enc.feed([0x48, 0x65])    // "He"
+    enc.feed([0x6c, 0x6c, 0x6f])  // "llo"
+    println("streaming = " + enc.finish())
+    println("expected  = SGVsbG8=")
 }
