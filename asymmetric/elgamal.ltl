@@ -1,30 +1,65 @@
-// Crypto: ElGamal Encryption
-// Category: Asymmetric
+// crypto/asymmetric/elgamal.ltl — ElGamal encryption (Taher ElGamal, 1985).
+//
+// Built on DH: public key y = g^x mod p, private key x.
+// Encrypt m with ephemeral k:  (c1, c2) = (g^k mod p, m · y^k mod p)
+// Decrypt: m = c2 · (c1^x)^(−1) mod p
+//
+// Properties:
+//   • NON-deterministic (unlike textbook RSA) — same message encrypts
+//     differently each time thanks to ephemeral k.
+//   • Ciphertext is 2× the plaintext size.
+//   • Multiplicatively homomorphic: E(m1)·E(m2) = E(m1·m2). This is
+//     useful for e-voting (Benaloh, Helios) but malleable by default
+//     — pair with NIZK proofs or switch to Cramer–Shoup for CCA.
+//   • Still used in PGP/GPG legacy subkeys and Schnorr-group signatures.
+//
+// k MUST be fresh and uniformly random for every encryption; reusing
+// k across messages lets an adversary recover the plaintexts.
+
 module crypto.asymmetric.elgamal
 
-pub fn process(data: list) -> list {
-    // ElGamal Encryption implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+use crypto.asymmetric.rsa_simple   // mod_pow, mod_inverse
+
+pub struct PublicKey  { pub p: int, pub g: int, pub y: int }
+pub struct PrivateKey { pub p: int, pub g: int, pub y: int, pub x: int }
+pub struct Ciphertext { pub c1: int, pub c2: int }
+
+pub fn generate(p: int, g: int, x: int) -> PrivateKey {
+    if x < 2 || x >= p - 1 { throw Error("ElGamal: x out of range") }
+    let y = rsa_simple.mod_pow(g, x, p)
+    return PrivateKey { p: p, g: g, y: y, x: x }
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn public_of(sk: PrivateKey) -> PublicKey {
+    return PublicKey { p: sk.p, g: sk.g, y: sk.y }
+}
+
+pub fn encrypt(pk: PublicKey, k: int, m: int) -> Ciphertext {
+    if k < 2 || k >= pk.p - 1 { throw Error("ElGamal: k out of range") }
+    if m <= 0 || m >= pk.p    { throw Error("ElGamal: m out of range") }
+    let c1 = rsa_simple.mod_pow(pk.g, k, pk.p)
+    let s  = rsa_simple.mod_pow(pk.y, k, pk.p)
+    let c2 = (m * s) % pk.p
+    return Ciphertext { c1: c1, c2: c2 }
+}
+
+pub fn decrypt(sk: PrivateKey, ct: Ciphertext) -> int {
+    let s = rsa_simple.mod_pow(ct.c1, sk.x, sk.p)
+    let s_inv = rsa_simple.mod_inverse(s, sk.p)
+    return (ct.c2 * s_inv) % sk.p
+}
+
+/// Homomorphic multiplication: E(m1) ⊗ E(m2) = E(m1·m2).
+pub fn homomorphic_multiply(pk: PublicKey, a: Ciphertext, b: Ciphertext) -> Ciphertext {
+    return Ciphertext {
+        c1: (a.c1 * b.c1) % pk.p,
+        c2: (a.c2 * b.c2) % pk.p,
     }
-    return result
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("ElGamal Encryption: " + to_hex(output))
+    let sk = generate(23, 5, 6)
+    let pk = public_of(sk)
+    let ct = encrypt(pk, 3, 10)
+    println("recovered: " + decrypt(sk, ct) as str)   // 10
 }
