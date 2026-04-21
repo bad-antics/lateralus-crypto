@@ -1,30 +1,105 @@
-// Crypto: CMAC
-// Category: Mac
+// crypto/mac/cmac.ltl — NIST SP 800-38B CMAC (OMAC1) over AES-128.
+//
+// CMAC is a CBC-MAC variant that handles variable-length messages
+// correctly (plain CBC-MAC is insecure when the length isn't fixed).
+// The trick: derive two subkeys K1, K2 from E_K(0) by doubling in
+// GF(2¹²⁸). If the message is a whole number of 16-byte blocks, XOR
+// the last block with K1; otherwise pad with 10…0 and XOR with K2.
+// Then run CBC-MAC. Output is the last ciphertext block.
+//
+// Test vector (NIST SP 800-38B Example 1):
+//   K   = 2b7e151628aed2a6abf7158809cf4f3c
+//   M   = ""                 → T = bb1d6929e95937287fa37d129b756746
+//   M   = "6bc1bee22e409f96e93d7e117393172a"
+//                              → T = 070a16b46b4d4144f79bdd9dd04a287c
+
 module crypto.mac.cmac
 
-pub fn process(data: list) -> list {
-    // CMAC implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+use crypto.symmetric.aes_simple
+
+const BLOCK: int = 16
+const RB: int = 0x87  // GF(2¹²⁸) reduction polynomial for 128-bit blocks
+
+pub fn mac(key: list, msg: list) -> list {
+    // Derive subkeys from the encryption of a zero block.
+    let zero_block = zeros(BLOCK)
+    let l = aes_simple.encrypt_block(key, zero_block)
+    let k1 = double_in_gf(l)
+    let k2 = double_in_gf(k1)
+    // Determine block count and whether the last block is full.
+    let n = if len(msg) == 0 { 1 } else { (len(msg) + BLOCK - 1) / BLOCK }
+    let complete = len(msg) > 0 && (len(msg) % BLOCK) == 0
+    // Build the last block: M_n XOR K1 (complete) or pad(M_n) XOR K2.
+    let mut last = []
+    let last_start = (n - 1) * BLOCK
+    if complete {
+        let mut i = 0
+        while i < BLOCK { last = push(last, msg[last_start + i] ^ k1[i]); i += 1 }
+    } else {
+        let mut padded = []
+        let remaining = len(msg) - last_start
+        let mut i = 0
+        while i < remaining { padded = push(padded, msg[last_start + i]); i += 1 }
+        padded = push(padded, 0x80)
+        while len(padded) < BLOCK { padded = push(padded, 0x00) }
+        i = 0
+        while i < BLOCK { last = push(last, padded[i] ^ k2[i]); i += 1 }
     }
-    return output
+    // CBC-MAC over blocks 1..n-1 then the adjusted last block.
+    let mut x = zeros(BLOCK)
+    let mut b = 0
+    while b < n - 1 {
+        let mut block = []
+        let mut j = 0
+        while j < BLOCK { block = push(block, msg[b * BLOCK + j] ^ x[j]); j += 1 }
+        x = aes_simple.encrypt_block(key, block)
+        b += 1
+    }
+    let mut final_in = []
+    let mut j = 0
+    while j < BLOCK { final_in = push(final_in, x[j] ^ last[j]); j += 1 }
+    return aes_simple.encrypt_block(key, final_in)
+}
+
+pub fn verify(key: list, msg: list, tag: list) -> bool {
+    let expected = mac(key, msg)
+    if len(expected) != len(tag) { return false }
+    let mut diff = 0
+    let mut i = 0
+    while i < BLOCK { diff = diff | (expected[i] ^ tag[i]); i += 1 }
+    return diff == 0
+}
+
+fn double_in_gf(block: list) -> list {
+    let mut out = []
+    let mut carry = 0
+    let mut i = BLOCK - 1
+    while i >= 0 {
+        let new_carry = (block[i] >> 7) & 1
+        out = [((block[i] << 1) | carry) & 0xFF] + out
+        carry = new_carry
+        i -= 1
+    }
+    if carry == 1 { out[BLOCK - 1] = out[BLOCK - 1] ^ RB }
+    return out
+}
+
+fn zeros(n: int) -> list {
+    let mut v = []
+    let mut i = 0
+    while i < n { v = push(v, 0); i += 1 }
+    return v
 }
 
 pub fn to_hex(bytes: list) -> str {
     let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
+    let mut out = ""
+    for byte in bytes { out += chars[byte / 16] as str + chars[byte % 16] as str }
+    return out
 }
 
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("CMAC: " + to_hex(output))
+    let key = [0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c]
+    println("CMAC(empty) = " + to_hex(mac(key, [])))
+    println("expected    = bb1d6929e95937287fa37d129b756746")
 }
