@@ -1,30 +1,88 @@
-// Crypto: Merkle Tree
-// Category: Structures
+// crypto/structures/merkle_tree.ltl — Merkle hash tree (Merkle, 1987).
+//
+// A binary tree where each leaf = H(data) and each internal node =
+// H(left || right). The root is a single cryptographic commitment to
+// all the leaves. Inclusion proofs are O(log n): supply the sibling
+// hashes on the path from a leaf to the root; verifier recomputes.
+//
+// Ubiquitous:
+//   • Bitcoin block-header Merkle root of transactions
+//   • Certificate Transparency logs (RFC 6962)
+//   • Git commit tree objects
+//   • IPFS MerkleDAG
+//   • ZFS data integrity, Amazon DynamoDB anti-entropy
+//   • zk-rollup state commitments (Plasma, Optimism, Arbitrum)
+//
+// Attack to guard against: second-preimage between leaves and internal
+// nodes. RFC 6962 fix: prefix leaf hashes with 0x00 and internal hashes
+// with 0x01 before hashing — domain separation.
+
 module crypto.structures.merkle_tree
 
-pub fn process(data: list) -> list {
-    // Merkle Tree implementation
-    let mut output = []
+use crypto.hash.sha256
+
+const LEAF_PREFIX: int = 0x00
+const NODE_PREFIX: int = 0x01
+
+pub struct MerkleTree { pub leaves: list, pub nodes: list, pub root: list }
+pub struct InclusionProof { pub index: int, pub path: list }
+
+pub fn build(data: list) -> MerkleTree {
+    if len(data) == 0 { throw Error("Merkle: at least one leaf required") }
+    // Leaves: H(0x00 || data[i]).
+    let mut level = []
+    for item in data { level = push(level, hash_leaf(item)) }
+    let leaves = level
+    let mut all_levels = [level]
+    while len(level) > 1 {
+        let mut next = []
+        let mut i = 0
+        while i < len(level) {
+            let left = level[i]
+            // Duplicate last odd leaf (Bitcoin convention; CT uses a
+            // different "balanced" rule).
+            let right = if i + 1 < len(level) { level[i + 1] } else { left }
+            next = push(next, hash_node(left, right))
+            i += 2
+        }
+        all_levels = push(all_levels, next)
+        level = next
+    }
+    return MerkleTree { leaves: leaves, nodes: all_levels, root: level[0] }
+}
+
+pub fn prove(tree: MerkleTree, index: int) -> InclusionProof {
+    if index < 0 || index >= len(tree.leaves) {
+        throw Error("Merkle: index out of range")
+    }
+    let mut path = []
+    let mut idx = index
+    let mut level_i = 0
+    while level_i < len(tree.nodes) - 1 {
+        let level = tree.nodes[level_i]
+        let sibling_idx = if (idx & 1) == 0 {
+            if idx + 1 < len(level) { idx + 1 } else { idx }   // duplicate
+        } else { idx - 1 }
+        let sibling = level[sibling_idx]
+        let on_left = (idx & 1) == 1
+        path = push(path, (sibling, on_left))
+        idx = idx / 2
+        level_i += 1
+    }
+    return InclusionProof { index: index, path: path }
+}
+
+pub fn verify(root: list, data: list, proof: InclusionProof) -> bool {
+    let mut h = hash_leaf(data)
+    for (sibling, sibling_on_left) in proof.path {
+        h = if sibling_on_left { hash_node(sibling, h) } else { hash_node(h, sibling) }
+    }
+    let mut diff = 0
+    if len(h) != len(root) { return false }
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
-    }
-    return output
+    while i < len(h) { diff = diff | (h[i] ^ root[i]); i += 1 }
+    return diff == 0
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
-    }
-    return result
-}
-
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Merkle Tree: " + to_hex(output))
-}
+fn hash_leaf(data: list) -> list  { return sha256.hash([LEAF_PREFIX] + data) }
+fn hash_node(l: list, r: list) -> list { return sha256.hash([NODE_PREFIX] + l + r) }
