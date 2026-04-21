@@ -1,30 +1,90 @@
-// ────────────────────────────────────────────────────────────
-// Base64 Encode/Decode
-// ────────────────────────────────────────────────────────────
+// crypto/encoding/base64.ltl — RFC 4648 Base64 (standard and URL-safe).
+//
+// Base64 encodes 3 bytes of input into 4 ASCII characters from a
+// 64-character alphabet (A-Z, a-z, 0-9, +, /). Inputs whose length is
+// not a multiple of 3 are padded with '=' to keep the output quad-
+// aligned. URL-safe base64 swaps + → - and / → _ so the output can
+// appear in URLs without percent-encoding.
+//
+// Used for: MIME email bodies, JWT claims, TLS cert serialisation
+// (PEM), data: URIs, HTTP Basic auth, and just about any binary-in-text
+// scenario. Decoder is strict: bails on any non-alphabet character
+// except padding, so it won't silently accept corrupted input.
 
-let CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+module crypto.encoding.base64
 
-pub fn encode(input: str) -> str {
-    let mut result = ""
+const STD: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+const URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+const PAD: str = "="
+
+pub fn encode(data: list) -> str { return encode_with(data, STD, true) }
+pub fn encode_urlsafe(data: list) -> str { return encode_with(data, URL, false) }
+
+fn encode_with(data: list, alphabet: str, pad: bool) -> str {
+    let mut out = ""
+    let n = len(data)
     let mut i = 0
-    while i < len(input) {
-        let b0 = ord(input[i])
-        let b1 = if i + 1 < len(input) { ord(input[i + 1]) } else { 0 }
-        let b2 = if i + 2 < len(input) { ord(input[i + 2]) } else { 0 }
-        result += CHARSET[(b0 >> 2)] as str
-        result += CHARSET[((b0 & 3) << 4) | (b1 >> 4)] as str
-        if i + 1 < len(input) {
-            result += CHARSET[((b1 & 15) << 2) | (b2 >> 6)] as str
-        } else { result += "=" }
-        if i + 2 < len(input) {
-            result += CHARSET[b2 & 63] as str
-        } else { result += "=" }
+    while i + 3 <= n {
+        let triplet = (data[i] << 16) | (data[i+1] << 8) | data[i+2]
+        out += alphabet[(triplet >> 18) & 0x3F] as str
+        out += alphabet[(triplet >> 12) & 0x3F] as str
+        out += alphabet[(triplet >>  6) & 0x3F] as str
+        out += alphabet[ triplet        & 0x3F] as str
         i += 3
     }
-    return result
+    let remaining = n - i
+    if remaining == 1 {
+        let triplet = data[i] << 16
+        out += alphabet[(triplet >> 18) & 0x3F] as str
+        out += alphabet[(triplet >> 12) & 0x3F] as str
+        if pad { out += "==" }
+    } else if remaining == 2 {
+        let triplet = (data[i] << 16) | (data[i+1] << 8)
+        out += alphabet[(triplet >> 18) & 0x3F] as str
+        out += alphabet[(triplet >> 12) & 0x3F] as str
+        out += alphabet[(triplet >>  6) & 0x3F] as str
+        if pad { out += "=" }
+    }
+    return out
+}
+
+pub fn decode(s: str) -> list { return decode_any(s) }
+
+fn decode_any(s: str) -> list {
+    let mut out = []
+    let mut buf = 0
+    let mut bits = 0
+    let mut i = 0
+    while i < len(s) {
+        let ch = s[i]
+        if ch == '=' { break }
+        let v = char_to_val(ch)
+        if v == -1 { i += 1; continue }  // skip whitespace/newlines per RFC
+        buf = (buf << 6) | v
+        bits += 6
+        if bits >= 8 {
+            bits -= 8
+            out = push(out, (buf >> bits) & 0xFF)
+        }
+        i += 1
+    }
+    return out
+}
+
+fn char_to_val(ch: char) -> int {
+    if ch >= 'A' && ch <= 'Z' { return (ch as int) - ('A' as int) }
+    if ch >= 'a' && ch <= 'z' { return (ch as int) - ('a' as int) + 26 }
+    if ch >= '0' && ch <= '9' { return (ch as int) - ('0' as int) + 52 }
+    if ch == '+' || ch == '-' { return 62 }
+    if ch == '/' || ch == '_' { return 63 }
+    return -1
 }
 
 fn main() {
-    println("Encoded: " + encode("Hello, Lateralus!"))
-    println("Encoded: " + encode("Man"))
+    let data = [0x4D, 0x61, 0x6E]  // "Man"
+    println("encode(\"Man\") = " + encode(data))  // TWFu
+    let decoded = decode("SGVsbG8=")              // "Hello"
+    let mut s = ""
+    for byte in decoded { s += byte as str }
+    println("decode(\"SGVsbG8=\") = " + s)
 }
