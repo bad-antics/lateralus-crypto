@@ -1,30 +1,127 @@
-// Crypto: RSA (Simplified)
-// Category: Asymmetric
+// crypto/asymmetric/rsa_simple.ltl — textbook RSA (PKCS#1 §5.1).
+//
+// Rivest–Shamir–Adleman (1977). Public key (n, e), private key (n, d).
+// n = p·q, φ(n) = (p−1)(q−1), ed ≡ 1 (mod φ(n)).
+// Encryption:  c = m^e mod n
+// Decryption:  m = c^d mod n
+// Signing:     s = m^d mod n     (with hash + PSS padding in practice)
+//
+// EDUCATIONAL — textbook RSA is INSECURE. Real systems MUST use:
+//   • OAEP padding (PKCS#1 v2) for encryption
+//   • PSS padding for signatures
+//   • Key sizes ≥ 2048 bits (3072+ for new systems, NIST SP 800-131A)
+//   • CRT-based decryption for ~4× speedup
+//   • Blinding to defeat timing attacks (Kocher 1996)
+// Deterministic textbook RSA leaks plaintext equality and is malleable
+// (c₁ · c₂ = (m₁m₂)^e mod n). Modern TLS 1.3 dropped RSA encryption.
+
 module crypto.asymmetric.rsa_simple
 
-pub fn process(data: list) -> list {
-    // RSA (Simplified) implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+pub struct PublicKey  { pub n: int, pub e: int }
+pub struct PrivateKey { pub n: int, pub e: int, pub d: int, pub p: int, pub q: int }
+
+pub fn generate(p: int, q: int, e: int) -> PrivateKey {
+    if !is_probable_prime(p) || !is_probable_prime(q) {
+        throw Error("RSA: p and q must be prime")
     }
-    return output
+    if p == q { throw Error("RSA: p and q must differ") }
+    let n = p * q
+    let phi = (p - 1) * (q - 1)
+    if gcd(e, phi) != 1 { throw Error("RSA: e must be coprime to φ(n); try 65537") }
+    let d = mod_inverse(e, phi)
+    return PrivateKey { n: n, e: e, d: d, p: p, q: q }
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn public_of(priv: PrivateKey) -> PublicKey {
+    return PublicKey { n: priv.n, e: priv.e }
+}
+
+pub fn encrypt(pk: PublicKey, m: int) -> int {
+    if m < 0 || m >= pk.n { throw Error("RSA: message out of range") }
+    return mod_pow(m, pk.e, pk.n)
+}
+
+/// Decrypt via CRT: compute m mod p and m mod q separately, recombine.
+/// ~4× faster than m = c^d mod n and standard for real RSA.
+pub fn decrypt(sk: PrivateKey, c: int) -> int {
+    let dp = sk.d % (sk.p - 1)
+    let dq = sk.d % (sk.q - 1)
+    let q_inv = mod_inverse(sk.q, sk.p)
+    let m1 = mod_pow(c % sk.p, dp, sk.p)
+    let m2 = mod_pow(c % sk.q, dq, sk.q)
+    let mut h = (q_inv * (m1 - m2)) % sk.p
+    if h < 0 { h += sk.p }
+    return m2 + h * sk.q
+}
+
+pub fn sign(sk: PrivateKey, hashed_msg: int) -> int {
+    return decrypt(sk, hashed_msg)   // textbook: s = H(m)^d mod n
+}
+
+pub fn verify(pk: PublicKey, hashed_msg: int, sig: int) -> bool {
+    return mod_pow(sig, pk.e, pk.n) == hashed_msg
+}
+
+// ---- number theory helpers ----
+
+pub fn mod_pow(base: int, exp: int, m: int) -> int {
+    if m == 1 { return 0 }
+    let mut result = 1
+    let mut b = base % m
+    let mut e = exp
+    while e > 0 {
+        if (e & 1) == 1 { result = (result * b) % m }
+        e = e >> 1
+        b = (b * b) % m
     }
     return result
 }
 
+fn gcd(a: int, b: int) -> int {
+    let mut x = a; let mut y = b
+    while y != 0 { let t = y; y = x % y; x = t }
+    return x
+}
+
+pub fn mod_inverse(a: int, m: int) -> int {
+    // Extended Euclidean.
+    let mut old_r = a; let mut r = m
+    let mut old_s = 1; let mut s = 0
+    while r != 0 {
+        let q = old_r / r
+        let tr = old_r - q * r; old_r = r; r = tr
+        let ts = old_s - q * s; old_s = s; s = ts
+    }
+    if old_r != 1 { throw Error("mod_inverse: not invertible") }
+    return if old_s < 0 { old_s + m } else { old_s }
+}
+
+fn is_probable_prime(n: int) -> bool {
+    // Miller–Rabin with fixed witnesses (correct for n < 3·10¹⁸).
+    if n < 2 { return false }
+    for p in [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+        if n == p { return true }
+        if (n % p) == 0 { return false }
+    }
+    let mut d = n - 1; let mut r = 0
+    while (d & 1) == 0 { d = d >> 1; r += 1 }
+    for a in [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37] {
+        let mut x = mod_pow(a, d, n)
+        if x == 1 || x == n - 1 { continue }
+        let mut i = 0; let mut composite = true
+        while i < r - 1 {
+            x = (x * x) % n
+            if x == n - 1 { composite = false; break }
+            i += 1
+        }
+        if composite { return false }
+    }
+    return true
+}
+
 fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("RSA (Simplified): " + to_hex(output))
+    let sk = generate(61, 53, 17)     // classic RSA textbook example
+    let pk = public_of(sk)
+    let ct = encrypt(pk, 65)
+    println("ct = " + ct as str + "  pt = " + decrypt(sk, ct) as str)
 }
