@@ -1,35 +1,93 @@
-// ────────────────────────────────────────────────────────────
-// Caesar Cipher
-// ────────────────────────────────────────────────────────────
+// crypto/ciphers/caesar.ltl — Caesar shift cipher (historical).
+//
+// Julius Caesar (c. 58 BCE) shifted each letter of the alphabet by a
+// fixed key — classically 3. Provides ZERO confidentiality against any
+// adversary with pencil and paper: only 26 possible keys means brute-
+// force takes milliseconds, and letter-frequency analysis reveals the
+// key from a single sentence of English text. Included here as the
+// canonical "teaching example" for symmetric cryptography and as a
+// building block for Vigenère.
 
-pub fn encrypt(text: str, key: int) -> str {
-    let mut result = ""
-    for ch in text {
-        let c = ord(ch)
-        if c >= ord("A") && c <= ord("Z") {
-            result += chr((c - ord("A") + key) % 26 + ord("A"))
-        } else if c >= ord("a") && c <= ord("z") {
-            result += chr((c - ord("a") + key) % 26 + ord("a"))
-        } else { result += ch }
+module crypto.ciphers.caesar
+
+pub fn encrypt(plaintext: str, shift: int) -> str {
+    let k = ((shift % 26) + 26) % 26
+    let mut out = ""
+    let mut i = 0
+    while i < len(plaintext) {
+        let c = plaintext[i]
+        if c >= 'A' && c <= 'Z' {
+            let offset = ((c as int) - ('A' as int) + k) % 26
+            out += (('A' as int) + offset) as char as str
+        } else if c >= 'a' && c <= 'z' {
+            let offset = ((c as int) - ('a' as int) + k) % 26
+            out += (('a' as int) + offset) as char as str
+        } else {
+            out += c as str   // punctuation, digits, whitespace pass through
+        }
+        i += 1
     }
-    return result
+    return out
 }
 
-pub fn decrypt(text: str, key: int) -> str { return encrypt(text, 26 - key) }
+pub fn decrypt(ciphertext: str, shift: int) -> str {
+    return encrypt(ciphertext, -shift)
+}
 
-pub fn brute_force(cipher: str) -> list {
-    let mut results = []
+/// Try all 25 non-trivial shifts and return the plaintext whose letter
+/// distribution best matches English. Works on any English message
+/// longer than a dozen characters. Uses χ² distance against the
+/// canonical English letter frequencies.
+pub fn brute_force(ciphertext: str) -> (int, str) {
+    let mut best_key = 0
+    let mut best_score = 1e18
+    let mut best_plain = ""
     let mut k = 0
     while k < 26 {
-        results = push(results, [k, decrypt(cipher, k)])
+        let candidate = decrypt(ciphertext, k)
+        let score = chi_squared(candidate)
+        if score < best_score {
+            best_score = score; best_key = k; best_plain = candidate
+        }
         k += 1
     }
-    return results
+    return (best_key, best_plain)
+}
+
+const ENGLISH_FREQ: list = [
+    0.08167, 0.01492, 0.02782, 0.04253, 0.12702, 0.02228, 0.02015, 0.06094,
+    0.06966, 0.00153, 0.00772, 0.04025, 0.02406, 0.06749, 0.07507, 0.01929,
+    0.00095, 0.05987, 0.06327, 0.09056, 0.02758, 0.00978, 0.02360, 0.00150,
+    0.01974, 0.00074
+]
+
+fn chi_squared(text: str) -> float {
+    let mut counts = []
+    let mut i = 0
+    while i < 26 { counts = push(counts, 0); i += 1 }
+    let mut total = 0
+    i = 0
+    while i < len(text) {
+        let c = text[i]
+        if c >= 'a' && c <= 'z' { counts[(c as int) - ('a' as int)] += 1; total += 1 }
+        else if c >= 'A' && c <= 'Z' { counts[(c as int) - ('A' as int)] += 1; total += 1 }
+        i += 1
+    }
+    if total == 0 { return 1e18 }
+    let mut chi = 0.0
+    i = 0
+    while i < 26 {
+        let expected = ENGLISH_FREQ[i] * (total as float)
+        let diff = (counts[i] as float) - expected
+        chi += (diff * diff) / expected
+        i += 1
+    }
+    return chi
 }
 
 fn main() {
-    let msg = "The Quick Brown Fox"
-    let enc = encrypt(msg, 13)
-    println("Encrypted: " + enc)
-    println("Decrypted: " + decrypt(enc, 13))
+    println(encrypt("HELLO, WORLD!", 3))   // "KHOOR, ZRUOG!"
+    println(decrypt("KHOOR, ZRUOG!", 3))   // "HELLO, WORLD!"
+    let (key, pt) = brute_force("KHOOR, ZRUOG!")
+    println("cracked key=" + key as str + " plaintext=" + pt)
 }
