@@ -1,30 +1,77 @@
-// Crypto: Random Oracle Model
-// Category: Protocols
+// crypto/protocols/random_oracle.ltl — random-oracle model helpers.
+//
+// The Random Oracle Model (Bellare & Rogaway 1993) idealizes a hash
+// function as a truly random function accessible by all parties.
+// Many schemes — Fiat-Shamir, RSA-OAEP, RSA-PSS, Fujisaki-Okamoto —
+// prove security in the ROM, then instantiate the "oracle" with
+// SHA-256/SHA-3 in practice. The Canetti–Goldreich–Halevi (2004) result
+// showed the ROM is an IDEALIZATION, not a theorem; still, no real
+// break of a ROM-proven scheme has been found when instantiated with
+// a modern hash.
+//
+// This module provides two domain-separated ROM primitives used
+// throughout the stdlib:
+//   • hash_to_scalar — map bytes to an integer in [1, n-1] for ECDSA/Schnorr
+//   • hash_to_bytes  — fixed-length KDF-style output (MGF1 / HKDF-Expand-like)
+//
+// Always include a domain-separation tag when calling a hash as an
+// oracle to prevent length-extension / cross-protocol attacks.
+
 module crypto.protocols.random_oracle
 
-pub fn process(data: list) -> list {
-    // Random Oracle Model implementation
-    let mut output = []
-    let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+use crypto.hash.sha256
+
+/// Map bytes to a scalar modulo n. Rejection-samples to avoid modulo bias
+/// on the high bits; follows RFC 9380 §5 "hash_to_field" simplified.
+pub fn hash_to_scalar(domain_tag: list, data: list, n: int, byte_len: int) -> int {
+    let mut counter = 0
+    while true {
+        let input = domain_tag + [counter & 0xFF] + data
+        let digest = sha256.hash(input)
+        let candidate = bytes_to_int(slice(digest, 0, byte_len))
+        if candidate >= 1 && candidate < n { return candidate }
+        counter += 1
+        if counter > 255 { throw Error("hash_to_scalar: rejection sampling exhausted") }
     }
-    return output
+    return 0   // unreachable
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+/// MGF1 (PKCS#1 v2.1 §B.2.1) mask-generation function used by RSA-OAEP
+/// and RSA-PSS. Expands a seed to an arbitrary length with SHA-256.
+pub fn mgf1(seed: list, out_len: int) -> list {
+    let hash_len = 32
+    if out_len > hash_len * 0x100000000 { throw Error("MGF1: mask too long") }
+    let mut out = []
+    let mut counter = 0
+    while len(out) < out_len {
+        let c_bytes = [
+            (counter >> 24) & 0xFF, (counter >> 16) & 0xFF,
+            (counter >> 8) & 0xFF,  counter & 0xFF,
+        ]
+        out = out + sha256.hash(seed + c_bytes)
+        counter += 1
     }
-    return result
+    return slice(out, 0, out_len)
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("Random Oracle Model: " + to_hex(output))
+/// Fiat–Shamir transcript: hash a tagged sequence of byte strings.
+/// Order and boundaries matter — always length-prefix each item.
+pub fn transcript(tag: list, items: list) -> list {
+    let mut buf = tag
+    for item in items {
+        // 4-byte big-endian length prefix
+        let l = len(item)
+        buf = push(buf, (l >> 24) & 0xFF)
+        buf = push(buf, (l >> 16) & 0xFF)
+        buf = push(buf, (l >> 8) & 0xFF)
+        buf = push(buf, l & 0xFF)
+        buf = buf + item
+    }
+    return sha256.hash(buf)
+}
+
+fn bytes_to_int(b: list) -> int {
+    let mut v = 0
+    for byte in b { v = (v << 8) | byte }
+    return v
 }
