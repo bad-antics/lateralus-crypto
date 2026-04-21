@@ -1,30 +1,84 @@
-// Crypto: CBC Encryption Mode
-// Category: Modes
+// crypto/modes/cbc_mode.ltl — Cipher Block Chaining (NIST SP 800-38A).
+//
+// CBC encrypts each plaintext block as E(P_i ⊕ C_{i-1}), where C_0 is
+// the IV. The IV must be unpredictable for each encryption (typically
+// random, 16 bytes for AES). CBC is NOT authenticated — pair it with
+// HMAC-then-verify (encrypt-then-MAC) or prefer AEAD modes like GCM
+// or ChaCha20-Poly1305. Padding-oracle attacks (Vaudenay 2002) against
+// naive CBC implementations are devastating; always verify the MAC
+// BEFORE unpadding.
+//
+// Test vector (NIST SP 800-38A F.2.1, AES-128-CBC):
+//   key = 2b7e151628aed2a6abf7158809cf4f3c
+//   iv  = 000102030405060708090a0b0c0d0e0f
+//   pt  = 6bc1bee22e409f96e93d7e117393172a
+//   ct  = 7649abac8119b246cee98e9b12e9197d
+
 module crypto.modes.cbc_mode
 
-pub fn process(data: list) -> list {
-    // CBC Encryption Mode implementation
-    let mut output = []
+use crypto.symmetric.aes_simple
+use crypto.utils.padding_schemes
+
+const BLOCK: int = 16
+
+pub fn encrypt(key: list, iv: list, plaintext: list) -> list {
+    if len(iv) != BLOCK { throw Error("CBC IV must be 16 bytes") }
+    let padded = padding_schemes.pad(plaintext, BLOCK, padding_schemes.Scheme::Pkcs7)
+    let mut out = []
+    let mut prev = iv
     let mut i = 0
-    while i < len(data) {
-        let byte = data[i]
-        output = push(output, (byte + i) % 256)
-        i += 1
+    while i < len(padded) {
+        let mut xored = []
+        let mut j = 0
+        while j < BLOCK { xored = push(xored, padded[i + j] ^ prev[j]); j += 1 }
+        let ct_block = aes_simple.encrypt_block(key, xored)
+        out = out + ct_block
+        prev = ct_block
+        i += BLOCK
     }
-    return output
+    return out
 }
 
-pub fn to_hex(bytes: list) -> str {
-    let chars = "0123456789abcdef"
-    let mut result = ""
-    for b in bytes {
-        result += chars[b / 16] as str + chars[b % 16] as str
+pub fn decrypt(key: list, iv: list, ciphertext: list) -> list {
+    if len(iv) != BLOCK { throw Error("CBC IV must be 16 bytes") }
+    if len(ciphertext) == 0 || (len(ciphertext) % BLOCK) != 0 {
+        throw Error("CBC ciphertext must be a positive multiple of 16 bytes")
     }
-    return result
+    let mut padded = []
+    let mut prev = iv
+    let mut i = 0
+    while i < len(ciphertext) {
+        let ct_block = slice(ciphertext, i, i + BLOCK)
+        let dec = aes_simple.decrypt_block(key, ct_block)
+        let mut xored = []
+        let mut j = 0
+        while j < BLOCK { xored = push(xored, dec[j] ^ prev[j]); j += 1 }
+        padded = padded + xored
+        prev = ct_block
+        i += BLOCK
+    }
+    return padding_schemes.unpad(padded, BLOCK, padding_schemes.Scheme::Pkcs7)
 }
 
-fn main() {
-    let input = [72, 101, 108, 108, 111]  // "Hello"
-    let output = process(input)
-    println("CBC Encryption Mode: " + to_hex(output))
+/// CBC-with-ciphertext-stealing. When len(plaintext) is not a multiple
+/// of 16, avoid extra block expansion: swap the last two output blocks
+/// so the ciphertext matches the plaintext length exactly. Used by
+/// BitLocker and some disk-encryption schemes.
+pub fn encrypt_cts(key: list, iv: list, plaintext: list) -> list {
+    if len(plaintext) < BLOCK { throw Error("CBC-CTS needs ≥ one full block") }
+    if (len(plaintext) % BLOCK) == 0 { return encrypt(key, iv, plaintext) }
+    // Encrypt the first N-1 full blocks + a synthesized padded last block.
+    let n = (len(plaintext) + BLOCK - 1) / BLOCK
+    let tail_len = len(plaintext) - (n - 2) * BLOCK
+    let mut padded = slice(plaintext, 0, (n - 1) * BLOCK)
+    padded = padded + slice(plaintext, (n - 1) * BLOCK, len(plaintext))
+    while len(padded) < n * BLOCK { padded = push(padded, 0) }
+    let ct = encrypt(key, iv, padded)
+    // Swap last two blocks, truncate.
+    let last = slice(ct, (n - 1) * BLOCK, n * BLOCK)
+    let second_last = slice(ct, (n - 2) * BLOCK, (n - 1) * BLOCK)
+    let mut out = slice(ct, 0, (n - 2) * BLOCK)
+    out = out + slice(last, 0, tail_len - BLOCK)
+    out = out + second_last
+    return out
 }
